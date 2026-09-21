@@ -9,3 +9,4 @@ class DriverNode:
     pit_stops: int
     last_3_laps_average_seconds: float
     fuel_remaining: float
+    nearby_drivers: list
