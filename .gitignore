@@ -1,0 +1,4 @@
+.venv
+.idea
+fastf1_cache
+__pycache__
