@@ -3,9 +3,10 @@ import os
 import numpy as np
 import pandas as pd
 import networkx as nx
+from pandas.core.indexers import check_key_length
 
 from DriverNodeClass import DriverNode
-from typing import List
+from typing import List, Dict, Any
 
 class SessionAnalyser:
     def __init__(self, year: int, location: str, session_type: str = 'R'):
@@ -17,7 +18,7 @@ class SessionAnalyser:
         self.session = fastf1.get_session(year, location, session_type)
         self.session.load()
 
-    def extract_all_drivers_at_lap(self, target_lap: int) -> List[DriverNode]:
+    def all_drivers_at_lap(self, target_lap: int) -> List[DriverNode]:
         """Extract all drivers and driver information at target_lap from session.drivers"""
         drivers = []
 
@@ -30,14 +31,11 @@ class SessionAnalyser:
         if leader_row.empty:
             leader_row = target_laps_df.iloc[[0]]
 
-        reference_session_time = leader_row['LapStartTime'].values[0]
         past_laps_all = laps_df[laps_df['LapNumber'] <= target_lap]
 
 
         for driver in self.session.drivers:
             driver_code = self.session.get_driver(driver)['Abbreviation']
-
-            driver_laps = self.session.laps[self.session.laps['Driver'] == driver_code]
             past_laps = past_laps_all[past_laps_all['Driver'] == driver_code]
 
             if past_laps.empty:
@@ -55,57 +53,7 @@ class SessionAnalyser:
             recent_laps_second = past_laps.tail(3)['LapTime'].dt.total_seconds()
             avg_time = round(recent_laps_second.mean(), 2) if len(recent_laps_second) > 0 else np.nan
 
-            current_sector = "Sector 1"
-            try:
-                active_lap = driver_laps[
-                    (driver_laps['LapStartTime'] <= reference_session_time) &
-                    (driver_laps['Time'] >= reference_session_time)
-                ]
-
-                if active_lap.empty:
-                    active_lap = driver_laps[
-                        (driver_laps['LapStartTime'] <= reference_session_time) &
-                        (driver_laps['LapStartTime'] + pd.Timedelta(seconds=120) >= reference_session_time)
-                    ].tail(1)
-
-                if active_lap.empty:
-                    active_lap = driver_laps[driver_laps['LapStartTime'] <= reference_session_time].tail(1)
-
-                if not active_lap.empty:
-                    active_lap_num = active_lap['LapNumber'].values[0]
-                    lap_row = active_lap.iloc[0]
-
-                    telemetry = self.session.laps.pick_drivers(driver_code).pick_laps(active_lap_num).get_telemetry()
-
-                    if not telemetry.empty and 'Distance' in telemetry.columns:
-                        time_diffs = (telemetry['SessionTime'] - reference_session_time).abs()
-                        closest_idx = time_diffs.argsort().iloc[0]
-                        current_distance = telemetry['Distance'].iloc[closest_idx]
-
-                        s1_time = lap_row['Sector1SessionTime']
-                        s2_time = lap_row['Sector2SessionTime']
-
-                        s1_dist, s2_dist = 0.0, 0.0
-                        if pd.notna(s1_time):
-                            s1_idx = (telemetry['SessionTime'] - s1_time).abs().argsort().iloc[0]
-                            s1_dist = telemetry['Distance'].iloc[s1_idx]
-                        if pd.notna(s2_time):
-                            s2_idx = (telemetry['SessionTime'] - s2_time).abs().argsort().iloc[0]
-                            s2_dist = telemetry['Distance'].iloc[s2_idx]
-
-                        if s1_dist == 0: s1_dist = 3000.0
-                        if s2_dist == 0: s2_dist = 7000.0
-
-                        if s1_dist > 0 and current_distance <= s1_dist:
-                            current_sector = "Sector 1"
-                        elif s2_dist > 0 and current_distance <= s2_dist:
-                            current_sector = "Sector 2"
-                        else:
-                            current_sector = "Sector 3"
-            except Exception:
-                pass
-
-            nearby_drivers = self.extract_nearby_drivers(driver_code, target_laps_df)
+            nearby_drivers = self.nearby_drivers(driver_code, target_laps_df)
 
             driver_obj = DriverNode(
                 driver_code=driver_code,
@@ -114,8 +62,7 @@ class SessionAnalyser:
                 tyre_age=age,
                 pit_stops=pit_count,
                 last_3_laps_average_seconds=avg_time,
-                nearby_drivers=nearby_drivers,
-                current_sector=current_sector
+                nearby_drivers=nearby_drivers
             )
 
             drivers.append(driver_obj)
@@ -123,7 +70,7 @@ class SessionAnalyser:
         return drivers
 
     @staticmethod
-    def extract_nearby_drivers(target_driver: str, target_laps_df) -> List[DriverNode]:
+    def nearby_drivers(target_driver: str, target_laps_df) -> List[DriverNode]:
         target_row = target_laps_df[target_laps_df['Driver'] == target_driver]
         if target_row.empty or pd.isna(target_row['Time'].values[0]):
             return []
@@ -149,13 +96,93 @@ class SessionAnalyser:
         nearby_drivers = sorted(nearby_drivers, key=lambda x: abs(x['time_gap']))
         return nearby_drivers
 
-    def build_session_graph(self, target_lap: int):
+    def sector_info(self, target_lap: int) -> Dict[str, Any]:
+        laps_df = self.session.laps
+        target_laps_df = laps_df[laps_df['LapNumber'] == target_lap]
+
+        if target_laps_df.empty:
+            return {}
+
+        leader_row = target_laps_df[target_laps_df['Position'] == 1]
+        if leader_row.empty:
+            leader_row = target_laps_df.iloc[[0]]
+
+        leader_code = leader_row['Driver'].values[0]
+
+        s1_crossing_time = leader_row['Sector1SessionTime'].values[0]
+        s2_crossing_time = leader_row['Sector2SessionTime'].values[0]
+        lap_end_crossing_time = leader_row['Sector3SessionTime'].values[0]
+
+        checkpoints = {
+            "Sector 1": (s1_crossing_time, 'Sector1SessionTime'),
+            "Sector 2": (s2_crossing_time, 'Sector2SessionTime'),
+            "Sector 3": (lap_end_crossing_time, 'Sector3SessionTime'),
+        }
+
+        results = {}
+
+        for checkpoint_name, (crossing_time, time_col) in checkpoints.items():
+            if pd.isna(crossing_time):
+                continue
+
+            drivers_at_moment = []
+
+            for driver in self.session.drivers:
+                driver_code = self.session.get_driver(driver)['Abbreviation']
+                driver_laps = laps_df[laps_df['Driver'] == driver_code]
+
+                if driver_laps.empty:
+                    continue
+
+                active_lap = driver_laps[
+                    (driver_laps['LapStartTime'] <= crossing_time) &
+                    (driver_laps['Time'] >= crossing_time)
+                ]
+
+                if active_lap.empty:
+                    active_lap = driver_laps[driver_laps['LapStartTime'] <= crossing_time].tail(1)
+
+                if not active_lap.empty:
+                    lap_row = active_lap.iloc[0]
+                    lap_num = active_lap['LapNumber'].values[0]
+
+                    s1_t = lap_row['Sector1SessionTime']
+                    s2_t = lap_row['Sector2SessionTime']
+
+                    if pd.notna(s1_t) and crossing_time <= s1_t:
+                        sec = "Sector 1"
+                    elif pd.notna(s2_t) and crossing_time <= s2_t:
+                        sec = "Sector 2"
+                    else:
+                        sec = "Sector 3"
+
+                    driver_checkpoint_time = lap_row[time_col]
+                    if pd.notna(driver_checkpoint_time) and pd.notna(crossing_time):
+                        time_delta = (driver_checkpoint_time - crossing_time) / np.timedelta64(1, 's')
+                    else:
+                        time_delta = np.nan
+
+                    drivers_at_moment.append({
+                        'driver_code': driver_code,
+                        'lap_number': lap_num,
+                        'sector_at_moment': sec,
+                        'time_gap': time_delta
+                    })
+
+            results[checkpoint_name] = {
+                'leader_code': leader_code,
+                'crossing_time': crossing_time,
+                'drivers_status': drivers_at_moment
+            }
+        return results
+
+    def build_session_graph(self, target_lap: int) -> nx.Graph:
         G = nx.Graph()
 
         for sector in ["Sector 1", "Sector 2", "Sector 3"]:
             G.add_node(sector, node_type='sector')
 
-        drivers = self.extract_all_drivers_at_lap(target_lap)
+        drivers = self.all_drivers_at_lap(target_lap)
 
         processed_proximity_edges = set()
 
