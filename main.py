@@ -23,7 +23,7 @@ def format_time_mmssms(seconds):
 
 if __name__ == "__main__":
     analyzer = SessionAnalyser(year=2025, location='Hungarian Grand Prix', session_type='R')
-    target_lap = 55
+    target_lap = 70
     lap_snapshot = analyzer.all_drivers_at_lap(target_lap=target_lap)
 
     print(f"{'Driver':<8} | {'Pos':<4} | {'Tyre':<8} | {'Age':<4} | {'Pits':<5} | {'Avg Lap (s)':<12} | {'Nearby Drivers (within 5s)'}")
@@ -61,9 +61,8 @@ if __name__ == "__main__":
         for info in data['drivers_status']:
             if info['driver_code'] == data['leader_code']:
                 gap_str = "Leader"
-            elif info['lap_number'] < target_lap:
-                lap_diff = target_lap - info['lap_number']
-                gap_str = f"+{lap_diff} lap" if lap_diff == 1 else f"+{lap_diff} laps"
+            elif info['lap_diff'] > 0:
+                gap_str = f"+{info['lap_diff']} lap" if info['lap_diff'] == 1 else f"+{info['lap_diff']} laps"
             elif pd.isna(info['time_gap']):
                 gap_str = "N/A"
             else:

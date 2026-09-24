@@ -108,10 +108,28 @@ class SessionAnalyser:
             leader_row = target_laps_df.iloc[[0]]
 
         leader_code = leader_row['Driver'].values[0]
+        leader_lap_num = int(leader_row['LapNumber'].values[0])
 
         s1_crossing_time = leader_row['Sector1SessionTime'].values[0]
         s2_crossing_time = leader_row['Sector2SessionTime'].values[0]
         lap_end_crossing_time = leader_row['Sector3SessionTime'].values[0]
+
+        driver_base_status = {}
+        for driver in self.session.drivers:
+            driver_code = self.session.get_driver(driver)['Abbreviation']
+            driver_laps = laps_df[laps_df['Driver'] == driver_code]
+            if driver_laps.empty:
+                continue
+
+            d_target_lap = driver_laps[driver_laps['LapNumber'] == leader_lap_num]
+            if d_target_lap.empty:
+                d_target_lap = driver_laps[driver_laps['LapNumber'] < leader_lap_num].tail(1)
+                if d_target_lap.empty:
+                    d_target_lap = driver_laps.head(1)
+            d_lap_num = int(d_target_lap['LapNumber'].values[0])
+            driver_base_status[driver_code] = {
+                'lap_diff': leader_lap_num - d_lap_num
+            }
 
         checkpoints = {
             "Sector 1": (s1_crossing_time, 'Sector1SessionTime'),
@@ -144,7 +162,7 @@ class SessionAnalyser:
 
                 if not active_lap.empty:
                     lap_row = active_lap.iloc[0]
-                    lap_num = active_lap['LapNumber'].values[0]
+                    lap_num = int(lap_row['LapNumber'])
 
                     s1_t = lap_row['Sector1SessionTime']
                     s2_t = lap_row['Sector2SessionTime']
@@ -156,9 +174,20 @@ class SessionAnalyser:
                     else:
                         sec = "Sector 3"
 
+                    lap_diff = driver_base_status.get(driver_code, {}).get('lap_diff', 0)
                     driver_checkpoint_time = lap_row[time_col]
-                    if pd.notna(driver_checkpoint_time) and pd.notna(crossing_time):
+
+                    if lap_diff > 0:
+                        time_delta = np.nan
+                    elif pd.notna(driver_checkpoint_time) and pd.notna(crossing_time):
                         time_delta = (driver_checkpoint_time - crossing_time) / np.timedelta64(1, 's')
+
+                        recent_laps_sec = driver_laps['LapTime'].dt.total_seconds().dropna()
+                        avg_lap_time = recent_laps_sec.mean() if not recent_laps_sec.empty else 85.0
+
+                        if time_delta < -avg_lap_time:
+                            lap_diff += 1
+                            time_delta = np.nan
                     else:
                         time_delta = np.nan
 
@@ -166,7 +195,8 @@ class SessionAnalyser:
                         'driver_code': driver_code,
                         'lap_number': lap_num,
                         'sector_at_moment': sec,
-                        'time_gap': time_delta
+                        'time_gap': time_delta,
+                        'lap_diff': lap_diff
                     })
 
             results[checkpoint_name] = {
