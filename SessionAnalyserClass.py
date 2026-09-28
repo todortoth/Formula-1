@@ -190,7 +190,7 @@ class SessionAnalyser:
                         recent_laps_sec = driver_laps['LapTime'].dt.total_seconds().dropna()
                         avg_lap_time = recent_laps_sec.mean() if not recent_laps_sec.empty else 85.0
 
-                        if time_delta < -avg_lap_time:
+                        if abs(time_delta) > abs(avg_lap_time):
                             lap_diff += 1
                             target_lap_num = leader_lap_num - lap_diff
                             target_lap_row = driver_laps[driver_laps['LapNumber'] == target_lap_num]
