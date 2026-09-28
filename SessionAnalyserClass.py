@@ -155,7 +155,7 @@ class SessionAnalyser:
                 active_lap = driver_laps[
                     (driver_laps['LapStartTime'] <= crossing_time) &
                     (driver_laps['Time'] >= crossing_time)
-                ]
+                    ]
 
                 if active_lap.empty:
                     active_lap = driver_laps[driver_laps['LapStartTime'] <= crossing_time].tail(1)
@@ -175,11 +175,16 @@ class SessionAnalyser:
                         sec = "Sector 3"
 
                     lap_diff = driver_base_status.get(driver_code, {}).get('lap_diff', 0)
-                    driver_checkpoint_time = lap_row[time_col]
 
-                    if lap_diff > 0:
-                        time_delta = np.nan
-                    elif pd.notna(driver_checkpoint_time) and pd.notna(crossing_time):
+                    target_lap_num = leader_lap_num - lap_diff
+                    target_lap_row = driver_laps[driver_laps['LapNumber'] == target_lap_num]
+
+                    if not target_lap_row.empty:
+                        driver_checkpoint_time = target_lap_row[time_col].values[0]
+                    else:
+                        driver_checkpoint_time = np.nan
+
+                    if pd.notna(driver_checkpoint_time) and pd.notna(crossing_time):
                         time_delta = (driver_checkpoint_time - crossing_time) / np.timedelta64(1, 's')
 
                         recent_laps_sec = driver_laps['LapTime'].dt.total_seconds().dropna()
@@ -187,7 +192,13 @@ class SessionAnalyser:
 
                         if time_delta < -avg_lap_time:
                             lap_diff += 1
-                            time_delta = np.nan
+                            target_lap_num = leader_lap_num - lap_diff
+                            target_lap_row = driver_laps[driver_laps['LapNumber'] == target_lap_num]
+                            if not target_lap_row.empty and pd.notna(target_lap_row[time_col].values[0]):
+                                driver_checkpoint_time = target_lap_row[time_col].values[0]
+                                time_delta = (driver_checkpoint_time - crossing_time) / np.timedelta64(1, 's')
+                            else:
+                                time_delta = np.nan
                     else:
                         time_delta = np.nan
 

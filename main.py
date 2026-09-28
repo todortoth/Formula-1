@@ -23,7 +23,7 @@ def format_time_mmssms(seconds):
 
 if __name__ == "__main__":
     analyzer = SessionAnalyser(year=2025, location='Hungarian Grand Prix', session_type='R')
-    target_lap = 70
+    target_lap = 65
     lap_snapshot = analyzer.all_drivers_at_lap(target_lap=target_lap)
 
     print(f"{'Driver':<8} | {'Pos':<4} | {'Tyre':<8} | {'Age':<4} | {'Pits':<5} | {'Avg Lap (s)':<12} | {'Nearby Drivers (within 5s)'}")
@@ -50,26 +50,27 @@ if __name__ == "__main__":
               f"{formatted_avg_lap:<12} | "
               f"{nearby_str}")
 
-    snapshots = analyzer.sector_info(target_lap=target_lap)
+    for _ in range(5):
+        target_lap += 1
+        snapshots = analyzer.sector_info(target_lap=target_lap)
+        for sector_name, data in snapshots.items():
+            print(
+                f"--- Leader ({data['leader_code']}) finished: {sector_name} ---")
+            print(f"{'Driver':<8} | {'Sector':<16} | {'Lap':<5} | {'Leader'}")
+            print("-" * 60)
 
-    for sector_name, data in snapshots.items():
-        print(
-            f"--- Leader ({data['leader_code']}) finished: {sector_name} ---")
-        print(f"{'Driver':<8} | {'Sector':<16} | {'Lap':<5} | {'Leader'}")
-        print("-" * 60)
-
-        for info in data['drivers_status']:
-            if info['driver_code'] == data['leader_code']:
-                gap_str = "Leader"
-            elif info['lap_diff'] > 0:
-                gap_str = f"+{info['lap_diff']} lap" if info['lap_diff'] == 1 else f"+{info['lap_diff']} laps"
-            elif pd.isna(info['time_gap']):
-                gap_str = "N/A"
-            else:
-                prefix = "+" if info['time_gap'] > 0 else ""
-                gap_str = f"{prefix}{info['time_gap']:.3f}s"
-            print(f"{info['driver_code']:<8} | {info['sector_at_moment']:<16} | Lap {info['lap_number']:<5} | {gap_str}")
-        print("\n")
+            for info in data['drivers_status']:
+                if info['driver_code'] == data['leader_code']:
+                    gap_str = "Leader"
+                elif info['lap_diff'] > 0:
+                    gap_str = f"+{info['lap_diff']} lap" if info['lap_diff'] == 1 else f"+{info['lap_diff']} laps"
+                elif pd.isna(info['time_gap']):
+                    gap_str = "N/A"
+                else:
+                    prefix = "+" if info['time_gap'] > 0 else ""
+                    gap_str = f"{prefix}{info['time_gap']:.3f}s"
+                print(f"{info['driver_code']:<8} | {info['sector_at_moment']:<16} | Lap {info['lap_number']:<5} | {gap_str}")
+            print("\n")
 '''
     race_graph = analyzer.build_session_graph(target_lap=target_lap)
 
