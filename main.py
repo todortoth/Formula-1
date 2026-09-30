@@ -1,3 +1,10 @@
+"""
+main.py · Formula 1 Strategic Decisions
+=========================================================
+The entry point of the application. Loads session data, prints a summarized table of driver standings,
+tire states and sector gaps.
+"""
+
 from SessionAnalyserClass import SessionAnalyser
 
 import os
@@ -6,7 +13,7 @@ import networkx as nx
 import pandas as pd
 import numpy as np
 
-def format_time_mmssms(seconds):
+def format_time_mmssms(seconds) -> str:
     """Converting seconds or Timedelta to MIN:SEC:MILISEC format"""
     if pd.isna(seconds):
         return "N/A"

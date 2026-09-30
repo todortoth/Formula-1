@@ -1,3 +1,10 @@
+"""
+DriverNodeClass.py · Formula 1 Strategic Decisions
+=========================================================
+Defines the DriverNode class, acting as a structured container
+for an individual driver's telemetry compound, position, etc.
+"""
+
 from dataclasses import dataclass, field
 from typing import List, Dict, Any
 

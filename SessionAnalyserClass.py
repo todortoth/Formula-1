@@ -1,3 +1,10 @@
+"""
+SessionAnalyserClass.py · Formula 1 Strategic Decisions
+=========================================================
+The core data processor. It introduces the FastF1 API, handles caching,
+ calculates nearby drivers, evaluates track statuses.
+"""
+
 import fastf1
 import os
 import numpy as np
@@ -5,6 +12,7 @@ import pandas as pd
 import networkx as nx
 
 from DriverNodeClass import DriverNode
+from SectorNodeClass import SectorNode
 from typing import List, Dict, Any, Tuple
 
 
@@ -96,6 +104,9 @@ class SessionAnalyser:
             if pd.isna(crossing_time):
                 continue
 
+            status_code, status_msg = self._get_track_status_at_time(crossing_time)
+            sector_node_obj = SectorNode(checkpoint_name, status_code, status_msg)
+
             drivers_at_moment: List[Dict[str, Any]] = []
             for driver_code, driver_laps in driver_laps_grouped.items():
                 active_lap = driver_laps[
@@ -153,11 +164,24 @@ class SessionAnalyser:
             results[checkpoint_name] = {
                 'leader_code': leader_code,
                 'crossing_time': crossing_time,
+                'sector_node': sector_node_obj,
                 'drivers_status': drivers_at_moment
             }
 
         return results
 
+    def _get_track_status_at_time(self, crossing_time: int) -> tuple:
+        """Finds the active track status code and message at any given session time"""
+        track_statuses = self.session.track_status
+        if track_statuses is None or track_statuses.empty:
+            return '1', 'Clear'
+
+        active_statuses = track_statuses[track_statuses['Time'] <= crossing_time]
+        if active_statuses.empty:
+            return '1', 'Clear'
+
+        latest_status = active_statuses.iloc[-1]
+        return latest_status['Status'], latest_status['Message']
 
     def all_drivers_at_lap(self, target_lap: int) -> List[DriverNode]:
         """Extract comprehensive driver details, telemetry averages, nearby drivers, and sector snapshots for a target lap in a single pass."""
@@ -218,8 +242,20 @@ class SessionAnalyser:
         """Constructs and returns a NetworkX graph representing sector memberships and driver proximity at a specific sector."""
         G = nx.Graph()
 
-        for sector in ["Sector 1", "Sector 2", "Sector 3"]:
-            G.add_node(sector, node_type='sector')
+        sector_snapshots = self._compute_snapshot_at_lap(target_lap, self.session.laps)
+        target_snapshot = sector_snapshots.get(sector_name, {})
+        active_sector_node = target_snapshot.get('sector_node')
+
+        if active_sector_node:
+            G.add_node(
+                sector_name,
+                node_type='sector',
+                sector_object=active_sector_node,
+                is_sc=active_sector_node.is_safety_car,
+                is_vsc=active_sector_node.is_vsc
+            )
+        else:
+            G.add_node(sector_name, node_type='sector')
 
         drivers = self.all_drivers_at_lap(target_lap)
         processed_proximity_edges = set()
