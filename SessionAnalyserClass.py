@@ -44,7 +44,6 @@ class SessionAnalyser:
             return target_laps_df.iloc[0]
         return leader_row.iloc[0]
 
-
     def _compute_nearby_drivers(self, target_driver: str, target_laps_df: pd.DataFrame) -> List[Dict[str, Any]]:
         """Calculates drivers within a 5-second window of the target driver during a specific lap."""
         target_row = target_laps_df[target_laps_df['Driver'] == target_driver]
@@ -70,6 +69,23 @@ class SessionAnalyser:
                 })
 
         return sorted(nearby_drivers, key=lambda x: abs(x['time_gap']))
+
+    def _get_track_status_at_time(self, crossing_time: Any, sector_name: str = "Track") -> SectorNode:
+        """Finds active track status and returns a constructed SectorNode object."""
+        track_statuses = self.session.track_status
+        if track_statuses is None or track_statuses.empty or pd.isna(crossing_time):
+            return SectorNode(sector_name, '1', 'Clear')
+
+        active_statuses = track_statuses[track_statuses['Time'] <= crossing_time]
+        if active_statuses.empty:
+            return SectorNode(sector_name, '1', 'Clear')
+
+        latest_status = active_statuses.iloc[-1]
+        return SectorNode(
+            sector_name=sector_name,
+            track_status_code=str(latest_status['Status']),
+            status_message=str(latest_status['Message'])
+        )
 
     def _compute_snapshot_at_lap(self, target_lap: int, laps_df: pd.DataFrame) -> Dict[str, Dict[str, Any]]:
         """Computes sector checkpoint positions, lap counts and leader gaps for all drivers when the leader crosses sectors."""
@@ -104,8 +120,7 @@ class SessionAnalyser:
             if pd.isna(crossing_time):
                 continue
 
-            status_code, status_msg = self._get_track_status_at_time(crossing_time)
-            sector_node_obj = SectorNode(checkpoint_name, status_code, status_msg)
+            sector_node_obj = self._get_track_status_at_time(crossing_time, sector_name=checkpoint_name)
 
             drivers_at_moment: List[Dict[str, Any]] = []
             for driver_code, driver_laps in driver_laps_grouped.items():
@@ -170,19 +185,6 @@ class SessionAnalyser:
 
         return results
 
-    def _get_track_status_at_time(self, crossing_time: int) -> tuple:
-        """Finds the active track status code and message at any given session time"""
-        track_statuses = self.session.track_status
-        if track_statuses is None or track_statuses.empty:
-            return '1', 'Clear'
-
-        active_statuses = track_statuses[track_statuses['Time'] <= crossing_time]
-        if active_statuses.empty:
-            return '1', 'Clear'
-
-        latest_status = active_statuses.iloc[-1]
-        return latest_status['Status'], latest_status['Message']
-
     def all_drivers_at_lap(self, target_lap: int) -> List[DriverNode]:
         """Extract comprehensive driver details, telemetry averages, nearby drivers, and sector snapshots for a target lap in a single pass."""
         laps_df = self.session.laps
@@ -222,6 +224,10 @@ class SessionAnalyser:
                         if sec_name == "Sector 3":
                             current_sector = d_status['sector_at_moment']
 
+            current_sector_node = None
+            if current_sector in sector_snapshots:
+                current_sector_node = sector_snapshots[current_sector].get('sector_node')
+
             driver_obj = DriverNode(
                 driver_code=driver_code,
                 position=pos,
@@ -231,7 +237,8 @@ class SessionAnalyser:
                 last_3_laps_average_seconds=avg_time,
                 nearby_drivers=nearby_drivers,
                 sector_snapshots=driver_sectors,
-                current_sector=current_sector
+                current_sector=current_sector,
+                current_sector_node=current_sector_node
             )
 
             drivers.append(driver_obj)
@@ -252,7 +259,8 @@ class SessionAnalyser:
                 node_type='sector',
                 sector_object=active_sector_node,
                 is_sc=active_sector_node.is_safety_car,
-                is_vsc=active_sector_node.is_vsc
+                is_vsc=active_sector_node.is_vsc,
+                display_label=active_sector_node.get_display_label()
             )
         else:
             G.add_node(sector_name, node_type='sector')
@@ -272,6 +280,7 @@ class SessionAnalyser:
                 tyre_age=driver.tyre_age,
                 pit_stops=driver.pit_stops,
                 sector=driver_sector,
+                sector_node=driver.current_sector_node,
                 sector_snapshots=driver.sector_snapshots
             )
 

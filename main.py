@@ -2,7 +2,7 @@
 main.py · Formula 1 Strategic Decisions
 =========================================================
 The entry point of the application. Loads session data, prints a summarized table of driver standings,
-tire states and sector gaps.
+tire states, sector status, and sector gaps.
 """
 
 from SessionAnalyserClass import SessionAnalyser
@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 import networkx as nx
 import pandas as pd
 import numpy as np
+
 
 def format_time_mmssms(seconds) -> str:
     """Converting seconds or Timedelta to MIN:SEC:MILISEC format"""
@@ -37,8 +38,8 @@ if __name__ == "__main__":
     print(f"\n--- Summarized Data at lap {target_lap}. ---")
     lap_snapshot = analyzer.all_drivers_at_lap(target_lap=target_lap)
 
-    print(f"{'Driver':<8} | {'Pos':<4} | {'Tyre':<8} | {'Age':<4} | {'Pits':<5} | {'Avg Lap (s)':<12} | {'Nearby Drivers (within 5s)'}")
-    print("-" * 110)
+    print(f"{'Driver':<8} | {'Pos':<4} | {'Tyre':<8} | {'Age':<4} | {'Pits':<5} | {'Avg Lap (s)':<12} | {'Current Sector Status':<22} | {'Nearby Drivers (within 5s)'}")
+    print("-" * 135)
 
     for driver in lap_snapshot:
         nearby_str = "None"
@@ -50,21 +51,26 @@ if __name__ == "__main__":
             nearby_str = ", ".join(nearby_list)
         formatted_avg_lap = format_time_mmssms(driver.last_3_laps_average_seconds)
 
+        if driver.current_sector_node:
+            sector_status_str = f"{driver.current_sector} ({driver.current_sector_node.status_message})"
+        else:
+            sector_status_str = f"{driver.current_sector or 'Unknown'}"
+
         print(f"{driver.driver_code:<8} | "
               f"{str(driver.position):<4} | "
               f"{str(driver.compound):<8} | "
               f"{str(driver.tyre_age):<4} | "
               f"{driver.pit_stops:<5} | "
               f"{formatted_avg_lap:<12} | "
+              f"{sector_status_str:<22} | "
               f"{nearby_str}")
 
     print("\n--- Sector Info ---")
 
     for sector_name in ["Sector 1", "Sector 2", "Sector 3"]:
-        print(
-            f"--- Leader finished: {sector_name} ---")
-        print(f"{'Driver':<8} | {'Sector':<16} | {'Lap':<5} | {'Leader Gap'}")
-        print("-" * 60)
+        print(f"--- Leader finished: {sector_name} ---")
+        print(f"{'Driver':<8} | {'Sector':<12} | {'Lap':<5} | {'Leader Gap'}")
+        print("-" * 55)
 
         for driver in lap_snapshot:
             sec_info = driver.sector_snapshots.get(sector_name)
@@ -80,7 +86,7 @@ if __name__ == "__main__":
             else:
                 prefix = "+" if sec_info['time_gap'] > 0 else ""
                 gap_str = f"{prefix}{sec_info['time_gap']:.3f}s"
-            print(f"{driver.driver_code:<8} | {sec_info['sector_at_moment']:<16} | Lap {sec_info['lap_number']:<5} | {gap_str}")
+            print(f"{driver.driver_code:<8} | {sec_info['sector_at_moment']:<12} | Lap {sec_info['lap_number']:<5} | {gap_str}")
         print("\n")
 
     os.makedirs("graphs", exist_ok=True)
@@ -98,10 +104,18 @@ if __name__ == "__main__":
                        race_graph.nodes]
 
         pos = nx.spring_layout(race_graph, seed=42)
+
+        labels = {}
+        for node, data in race_graph.nodes(data=True):
+            if data.get('node_type') == 'sector' and 'display_label' in data:
+                labels[node] = data['display_label']
+            else:
+                labels[node] = str(node)
+
         nx.draw(
             race_graph,
             pos,
-            with_labels=True,
+            labels=labels,
             node_color=node_colors,
             node_size=700,
             font_size=10,
@@ -114,4 +128,3 @@ if __name__ == "__main__":
         plt.savefig(filename)
         print(f"Saved to: '{filename}'\n")
         plt.close()
-

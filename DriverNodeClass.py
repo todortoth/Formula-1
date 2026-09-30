@@ -8,6 +8,9 @@ for an individual driver's telemetry compound, position, etc.
 from dataclasses import dataclass, field
 from typing import List, Dict, Any
 
+from SectorNodeClass import SectorNode
+
+
 @dataclass
 class DriverNode:
     """Represents a driver's state and telemetry data at a specific point in a session."""
@@ -20,3 +23,4 @@ class DriverNode:
     nearby_drivers: List[Dict[str, Any]] = field(default_factory=list)
     sector_snapshots: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     current_sector: str = None
+    current_sector_node: SectorNode = None
