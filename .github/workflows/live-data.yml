@@ -23,7 +23,7 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: pyproject.toml
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: .fastf1_cache
           key: fastf1-2025-belgian-gp-v1
