@@ -1,5 +1,24 @@
+# IDE / environments
 .venv
 .idea
+F1-Obsidian
+
+# FastF1 cache and generated output
 fastf1_cache
+.fastf1_cache
 graphs
+
+# Python
 __pycache__
+*.py[cod]
+*.egg-info
+build
+dist
+
+# Test / lint / coverage artefacts
+.pytest_cache
+.ruff_cache
+.hypothesis
+.coverage
+coverage.xml
+htmlcov

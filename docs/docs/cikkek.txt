@@ -1,0 +1,76 @@
+https://www.frontiersin.org/journals/artificial-intelligence/articles/10.3389/frai.2025.1673148/full
+
+
+A „Data-driven pit stop decision support for Formula 1 using deep learning models” (2025) című tanulmány egy olyan mélytanulási keretrendszert mutat be, amely nyers telemetriai adatok alapján jósolja meg az optimális kerékcsere-időzítéseket a Formula–1-ben. A kutatás célja egy olyan dinamikus, valós idejű döntéshozatali asszisztens létrehozása, amely felülmúlja a hagyományos, sokszor szubjektív emberi stratégiákat. A tesztelt architektúrák közül a Bi-LSTM (kétirányú hosszú távú rövid távú memória) modell érte el a legjobb eredményt, 0,81-es F1-pontszámmal.
+
+1. Adatgyűjtés és Előfeldolgozás (Data Preprocessing)
+A szerzők a FastF1 Python API-n keresztül gyűjtötték össze a 2020 és 2024 közötti versenyhétvégék hivatalos adatait. A teljes adatkészlet 99 928 kört tartalmazott.
+- Szűrések: Minden olyan kört töröltek, ahol a pilóták esős (Intermediate, Wet) vagy ismeretlen típusú gumikat használtak. Ennek oka, hogy a vizes pályás kerékcserék reaktívak (az időjárástól függnek), míg a száraz pályás stratégiák jól modellezhető mintákat követnek. Low-significance (alacsony fontosságú) változókat, mint a páratartalom és a levegő hőmérséklete, szintén kihagytak.
+- Adathiányok kezelése: A pozíció és a köridő hiányzó értékeit K-Nearest Neighbors (KNN) Imputerrel (k=5) pótolták a normalizálás után. A pályastátusz (pl. sárga zászló) hiányait a leggyakoribb értékkel (módusz) helyettesítették.
+- Feature Engineering (Új változók):
+	- CumulativeTimeStint: Az adott gumiszetten eltöltött kumulatív idő.
+	- DriverAheadPit / DriverBehindPit: Jelzi, hogy az előtte vagy mögötte haladó kiállt-e már a bokszba.
+	- delta_laptime: Az előző körhöz képest mért időkülönbség.
+	-race_progress_fraction: A verseny aktuális előrehaladottsága a teljes távhoz képest.
+- Kategóriák kódolása: A nem-numerikus oszlopokat (csapat, pilóta, gumi összetétele, pálya neve) One-Hot Encoding eljárással alakították bináris formátumba.
+- Osztálykiegyenlítés (SMOTE): A bokszkiállások ritkák (kevesebb mint a körök 3,5%-a, mindössze 3131 kiállás a 88 299 nem-kiállásos körhöz képest). A modell eltolódásának megelőzésére a SMOTE (Synthetic Minority Over-sampling Technique) algoritmust alkalmazták, amellyel mesterséges minták generálásával tökéletesen kiegyenlítették a két osztályt (88 299 - 88 299 minta).
+
+2. Alkalmazott Modellek és Architektúra
+A kutatók öt különböző mélytanulási modellt képeztek ki 10 lépéses szekvenciahosszúsággal (sequence length). Minden modell az Adam optimalizálót (kiinduló tanulási ráta: 5*10^-4) és a Binary Crossentropy veszteségfüggvényt használta.
+- Bi-LSTM (A javasolt modell): Három egymásra épített kétirányú LSTM rétegből áll (256, 128, 64 egység), amelyet Dropout (0,2 és 0,3) és egy Sigmoid aktivációval ellátott sűrű (Dense) réteg követ. Előnye, hogy az idősoros adatokat időben előre és hátrafelé is feldolgozza, így látja a trendek alakulását.
+- TCN-GRU: A Temporal Convolutional Network (időbeli konvolúciós hálózat) és a Gated Recurrent Unit (kapuzott ismétlődő egység) kombinációja. A TCN réteg a hosszú távú összefüggéseket kódolja ki, míg a GRU szelektíven megőrzi a fontos adatokat.
+- GRU: A hagyományos RNN-nél hatékonyabb, az LSTM-nél pedig számításilag könnyebb alternatíva, amely szintén három egymásra épített réteget kapott (256 -> 128 -> 64).
+- InceptionTime: Eredetileg képfeldolgozásra tervezett Inception-modulok idősoros változata, amely különböző méretű konvolúciós szűrőkkel képes eltérő skálájú mintázatokat azonosítani.
+- CNN-BiLSTM: Hibrid modell, amely először egy 1D konvolúciós réteggel kinyeri a lokális/rövid távú mintákat (pl. hirtelen köridő-ugrás), majd ezeket átadja a BiLSTM rétegeknek a hosszú távú trendek elemzésére.
+
+3. Eredmények és Statisztikai VerifikációA modelleket a 2024-es szezon utolsó 8 versenyének adatain tesztelték. Mivel a teszthalmaz erősen kiegyensúlyozatlan (mindössze 3% bokszkiállás), a kisebbségi osztályra (HasPitStop = 1) vonatkozó precizitást (Precision), felidézést (Recall) és F1-pontszámot figyelték.
+A Bi-LSTM modell statisztikai fölényét a 95%-os konfidenciaintervallumok (CI) mellett elvégzett McNemar-féle páros tesztek is igazolták. A legközelebbi versenytárssal (TCN-GRU) szemben kapott p-érték 0,042, míg a többi modell esetében p < 0,001 lett, ami kimondja, hogy a Bi-LSTM jobb teljesítménye nem a véletlen műve.A gyakorlati alkalmazhatóságot két esettanulmányon (2025-ös Kínai Nagydíj és 2024-es Szingapúri Nagydíj) keresztül is bemutatták egy egyedileg fejlesztett vizualizációs interfészen, ahol a modell sikeresen követte le a valós helyzeteket.
+
+4. Felhasznált változók
+A cikkben a következő nyers telemetriai és versenyadatokat (jellemzőket/feature-öket) használták fel a kerékcserék előrejelzéséhez:
+- A gumiabroncs állapota: A gumi összetétele (lágy, közepes, kemény) és a gumi aktuális élettartama (a megfontolt gumiszetten megtett körök száma).
+- Időeredmények: Az aktuális köridő másodpercben, valamint a delta_laptime (a köridő változása az előző körhöz képest, ami a gumi kopására utal).
+- A verseny állása: A pilóta aktuális pozíciója a pályán, az aktuális kör száma, valamint a race_progress_fraction (a verseny össztávjához viszonyított előrehaladás).
+- Statisztikai adatok a gumiszettről: A CumulativeTimeStint (az adott gumiszetten eltöltött összesített idő másodpercben), valamint a gumi etapok száma (hanyadik szettet fogyasztja a pilóta).
+- A versenytársak viselkedése: A DriverAheadPit és DriverBehindPit mutatók, amelyek azt jelezték, hogy a közvetlenül előtte vagy mögötte haladó pilóta kiállt-e már a bokszba (ez a taktikai elemek, pl. az undercut vagy overcut miatt fontos).
+- Pályastátusz (Track Status): A versenyirányítás aktuális jelzései, például hogy érvényben van-e sárga zászló, biztonsági autó (Safety Car) vagy virtuális biztonsági autó (VSC) szakasz (mivel ilyenkor kevesebb időt veszít a pilóta a kiállással).
+- Azonosítók: A pilóta neve és rajtszáma (a különböző gumikezelési stílusok miatt), a csapat neve (a csapatstratégia miatt), valamint a nagydíj helyszíne.
+
+
+
+
+
+https://ieeexplore.ieee.org/abstract/document/11427134
+
+
+Az IEEE Xplore felületén megjelent, „Predicting Lap Times in Formula 1: A Deep Learning Approach Using LSTM Networks” című tanulmány részletes összefoglalója a felhasznált technológiák, elvek és a mögöttes logika mentén:
+
+1. Alapelvek és a kutatás logikája
+A Formula–1-ben a siker egyik legkritikusabb tényezője a stratégiai döntések optimális időzítése (például a kerékcserék/pit stopok ütemezése vagy a gumikeverékek kiválasztása). Ezek a döntések közvetlenül a versenyzők köridő-dinamikájától függnek.
+A kutatás logikája arra épül, hogy a köridők alakulása valójában egy összetett idősor (time series). Ebben a sorozatban keverednek:
+- Homogén mintázatok: Előrejelezhető folyamatok, mint például a gumik ütemes degradációja (kopása) miatti lassulás, vagy a tankolt üzemanyag fogyásából adódó könnyebb autó miatti gyorsulás.
+- Környezeti és kontextuális változók: Olyan külső tényezők, mint az autó és a csapat karakterisztikája, a pilóta képességei, valamint a dinamikusan változó pályaviszonyok.
+A modell célja, hogy megjósolja egy adott versenyző következő köridejét (next lap time). Ehhez egy olyan többdimenziós adatfeldolgozási csatornát (data pipeline) hoztak létre, amely a szekvenciális (időrendi) összefüggések mellett a kontextuális információkat is képes egyszerre értelmezni.
+
+2. Alkalmazott technológiák és architektúra
+A projekt gerincét a mélytanulási (Deep Learning) algoritmusok és a modern adatfeldolgozási eszközök adják:
+- Long Short-Term Memory (LSTM) hálózat: A kutatók azért ezt a speciális visszacsatolt neurális hálót (RNN) választották, mert az LSTM belső kapu-mechanizmusaival képes áthidalni a „tovatűnő gradiens” (vanishing gradient) problémáját. Kiválóan alkalmas arra, hogy megtartsa a hosszú távú időbeli függőségeket, így pontosan „emlékszik” az előző körök trendjeire, a gumi korábbi állapotára.
+- Többdimenziós adat-előkészítés és Feature Engineering: A nyers adatokból komplex változókat (feature-öket) hoztak létre. Integrálták a verseny-specifikus változókat a pilóták és a konstruktőrök egyedi jellemzőivel, hogy a neurális háló ne csak egy puszta számsort lásson, hanem kontextusában értelmezze a tempót.
+- Tanítási és értékelési keretrendszer:
+	- Tanító adathalmaz (Training set): A valós, történelmi adatokat a 2021–2023-as F1-es szezonokból gyűjtötték ki.
+	- Tesztelő adathalmaz (Evaluation set): A modell pontosságát és valós körülmények közötti működését a 2024-es teljes szezon adatain tesztelték és validálták.
+
+4. Felhasznált változók
+A bemutatott LSTM-alapú mélytanulási modell alapvetően a köridők (lap times) pontos előrejelzésére fókuszál. Mivel a kerékcserék (pit stopok) időzítését közvetlenül a köridők romlása és a gumik állapota határozza meg, a modell az alábbi három fő kategóriába sorolható adatokat és jellemzőket (feature-öket) használta fel a dinamika előrejelzéséhez:
+- Gumiabroncs és kopási adatok (Tire Data):
+	Az aktuálisan használt gumikeverék (lágy, közepes, kemény).
+	A gumiabroncs életkora (az adott szettben megtett körök száma).
+	A gumiabroncsok degradációjának (kopásának) becsült mértéke.
+- Idősoros és verseny-specifikus adatok (Sequential & Race Variables):
+	A korábbi körökben elért történelmi köridők (időrendi sorozatként).
+	Az üzemanyag-fogyasztás mértéke (fuel burn rate – ami a körök előrehaladtával könnyíti az autót).
+	A pályahőmérséklet és annak változásai (track temperature).
+- Kontextuális és egyedi jellemzők (Contextual Characteristics):
+	A pilóta egyedi jellemzői (vezetési stílus, gumikezelési hatékonyság).
+	A konstruktőr/csapat karakterisztikája (az autó alapvető tempója és gumikopási hajlama).
+A hálózat ezeket a többdimenziós adatokat fésüli össze, így amikor a gumi degradációja és a köridők növekedése (lassulás) elér egy kritikus pontot, a stratégiai rendszer képes előrejelezni az optimális kerékcsere pillanatát.

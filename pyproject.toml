@@ -1,0 +1,96 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "f1strategy"
+dynamic = ["version"]
+description = "Turn FastF1 race data into graph snapshots (10 m track ring + drivers) for ML strategy models."
+readme = "README.md"
+requires-python = ">=3.10"
+keywords = ["formula1", "f1", "fastf1", "graph", "telemetry", "machine-learning"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+    "Typing :: Typed",
+]
+dependencies = [
+    "fastf1>=3.4",
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "scipy>=1.10",
+    "networkx>=3.0",
+    "matplotlib>=3.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "hypothesis>=6.80",
+    "ruff>=0.5",
+    "build>=1.0",
+    "pyyaml>=6.0",
+    "tomli>=2.0; python_version < '3.11'",
+]
+
+[project.scripts]
+f1-graph = "f1strategy.cli:main"
+
+[project.urls]
+Repository = "https://github.com/todortoth/Formula-1"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+f1strategy = ["py.typed"]
+
+[tool.setuptools.dynamic]
+version = { attr = "f1strategy.__version__" }
+
+# ---------------------------------------------------------------- pytest
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers -m 'not live'"
+filterwarnings = [
+    "error",
+    # third-party noise: older matplotlib calls pyparsing's deprecated camelCase API
+    "ignore::pyparsing.warnings.PyparsingDeprecationWarning",
+]
+markers = [
+    "live: needs network access to the real FastF1 / F1 live timing API (deselected by default, run with -m live)",
+]
+
+# ---------------------------------------------------------------- coverage
+[tool.coverage.run]
+source = ["f1strategy"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_lines = ["pragma: no cover", "if __name__ == .__main__.:"]
+omit = ["*/f1strategy/__main__.py"]  # only exercised in a subprocess
+
+# ---------------------------------------------------------------- ruff
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+src = ["src", "tests"]
+extend-exclude = ["*.md"]  # newer ruff versions also format code blocks in markdown; keep lint to real code
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "C4"]
+ignore = ["E501"]  # long lines are handled by the formatter where possible; tables/strings may exceed
+
+[tool.ruff.lint.isort]
+known-first-party = ["f1strategy"]
+
+[tool.ruff.lint.per-file-ignores]
+# test fixtures: tuple-unpacking loops and small lambdas are the readable form there
+"tests/**" = ["B007", "E731", "C408", "B905"]

@@ -1,0 +1,31 @@
+name: Live data tests
+
+# Runs the tests marked `live` against the real FastF1 / F1 live-timing API. Kept out of ci.yml because it needs
+# network access, downloads a lot of data and depends on the availability of F1's servers.
+on:
+  schedule:
+    - cron: "0 6 * * 1"   # Mondays, 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      F1_CACHE_DIR: ${{ github.workspace }}/.fastf1_cache
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - uses: actions/cache@v4
+        with:
+          path: .fastf1_cache
+          key: fastf1-2025-belgian-gp-v1
+      - run: python -m pip install --upgrade pip && python -m pip install -e ".[dev]"
+      - run: python -m pytest -m live tests/live -v
