@@ -38,3 +38,9 @@ def arrays(G_sc):
 def track(analyser):
     """The track model of the standard synthetic session."""
     return analyser.track
+
+
+@pytest.fixture(scope="session")
+def sequence(analyser):
+    """The whole synthetic race (lights out to flag), one frame per second: yellow, SC, VSC, pit stop, retirement."""
+    return analyser.build_sequence(40.0, 380.0, 1.0)

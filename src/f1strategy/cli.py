@@ -18,9 +18,12 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from f1strategy.animation import RaceAnimator
 from f1strategy.graph.exporter import GraphExporter, suggest_pool_factor
 from f1strategy.plotting import plot_race_graph
 from f1strategy.reporting import print_driver_table, print_sector_info
+from f1strategy.sequence import resolve_step
+from f1strategy.sequence.sampling import DEFAULT_CHUNK_FRAMES
 from f1strategy.session import SessionAnalyser
 
 SECTORS = ("Sector 1", "Sector 2", "Sector 3")
@@ -32,6 +35,17 @@ class RunResult:
 
     npz_files: list[str] = field(default_factory=list)
     png_files: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ContinuousResult:
+    """Files written by :func:`run_continuous`."""
+
+    n_frames: int
+    continuity_ok: bool
+    parquet_dir: str | None = None
+    sequence_file: str | None = None  # the .npz, if requested
+    gif_file: str | None = None
 
 
 def _event(value: str) -> str | int:
@@ -70,7 +84,48 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--cache-dir", default=None, help="FastF1 cache directory (default: $F1_CACHE_DIR or ~/fastf1_cache)"
     )
-    p.add_argument("--no-tables", action="store_true", help="skip the console tables")
+    c = p.add_argument_group("continuous data (dense time sampling + GIF)")
+    c.add_argument(
+        "--continuous",
+        action="store_true",
+        help="also sample the race graph densely over a lap window, save it and render a GIF",
+    )
+    c.add_argument("--from-lap", type=int, default=None, help="first lap of the window (default: --lap)")
+    c.add_argument("--to-lap", type=int, default=None, help="last lap of the window (default: --from-lap)")
+    c.add_argument("--step", type=float, default=None, help="seconds between two frames (default: 1.0, or 1/--hz)")
+    c.add_argument(
+        "--hz",
+        type=float,
+        default=None,
+        help="frames per second of *data*, e.g. 10 (alternative to --step; not the GIF rate, see --fps)",
+    )
+    c.add_argument(
+        "--format",
+        dest="dataset_format",
+        choices=("parquet", "npz", "both"),
+        default="parquet",
+        help="dataset format: a Parquet directory (streamed, default), one .npz, or both",
+    )
+    c.add_argument(
+        "--chunk-frames",
+        type=int,
+        default=DEFAULT_CHUNK_FRAMES,
+        help=f"frames per Parquet part / in-memory chunk (bounds the memory use; default: {DEFAULT_CHUNK_FRAMES})",
+    )
+    c.add_argument(
+        "--gif-every",
+        type=int,
+        default=0,
+        help="use every n-th frame in the GIF (default: automatic, at most 300 frames)",
+    )
+    c.add_argument("--fps", type=float, default=10.0, help="playback frames per second of the GIF (default: 10)")
+    c.add_argument("--no-gif", action="store_true", help="in continuous mode: only write the dataset, no GIF")
+    c.add_argument(
+        "--no-snapshots",
+        action="store_true",
+        help="skip the sector snapshots (tables, plots, npz); requires --continuous",
+    )
+    p.add_argument("--no-tables", action="store_true", help="skip the console tables (sector snapshots)")
     p.add_argument("--no-plots", action="store_true", help="skip the PNG plots")
     p.add_argument("--no-export", action="store_true", help="skip the .npz export")
     p.add_argument("-v", "--verbose", action="store_true", help="debug logging")
@@ -132,12 +187,99 @@ def run(
     return result
 
 
+def run_continuous(
+    analyzer: SessionAnalyser,
+    location: str,
+    from_lap: int,
+    to_lap: int | None = None,
+    step_s: float | None = None,
+    out_dir: str = "graphs",
+    gif: bool = True,
+    gif_every: int = 0,
+    fps: float = 10.0,
+    hz: float | None = None,
+    dataset_format: str = "parquet",
+    chunk_frames: int = DEFAULT_CHUNK_FRAMES,
+) -> ContinuousResult:
+    """Continuous mode: sample the race every ``step_s`` seconds (or at ``hz``) from the moment the leader starts
+    ``from_lap`` until the leader completes ``to_lap``, check continuity, save the dataset and render a GIF.
+
+    With a Parquet dataset the race is streamed to disk in chunks (bounded memory), continuity is checked in Polars and
+    the GIF is drawn from a decimated read of the dataset; the in-memory path is only used for ``--format npz``."""
+    to_lap = from_lap if to_lap is None else to_lap
+    step = resolve_step(step_s, hz)
+    os.makedirs(out_dir, exist_ok=True)
+    start, end = analyzer.graph_builder.lap_window(from_lap, to_lap)
+    laps = f"{from_lap}" if to_lap == from_lap else f"{from_lap}-{to_lap}"
+    rates = analyzer.telemetry_rates()
+    print(
+        f"\nContinuous mode: laps {laps} = session time {start:.1f}-{end:.1f} s, one frame every {step:g} s ({1 / step:g} Hz)"
+    )
+    print(
+        f"  real telemetry: position {rates['position_hz']:.1f} Hz, car data {rates['car_hz']:.1f} Hz "
+        f"(merged ~{rates['merged_hz']:.1f} Hz); {1 / step:g} Hz data interpolates between real samples "
+        "(see pos_age_s / car_age_s)"
+    )
+
+    last_pct = -1
+
+    def show(done: int, total: int) -> None:
+        nonlocal last_pct
+        pct = 100 * done // total
+        if pct // 10 != last_pct // 10 or done == total:
+            print(f"  {pct:3d}%  ({done}/{total} frames)")
+        last_pct = pct
+
+    use_parquet = dataset_format in ("parquet", "both")
+    use_npz = dataset_format in ("npz", "both")
+    result = ContinuousResult(n_frames=0, continuity_ok=True)
+    dataset = seq = None
+
+    if use_parquet:
+        result.parquet_dir = f"{out_dir}/sequence_lap{laps}"
+        dataset = analyzer.write_sequence_parquet(
+            result.parquet_dir, start, end, step, chunk_frames=chunk_frames, overwrite=True, progress=show
+        )
+        report = dataset.continuity_report()
+        result.n_frames = dataset.n_frames
+        print(f"  {dataset}\n  {report.summary()}\nSaved Parquet dataset to: '{result.parquet_dir}'")
+    if use_npz:
+        seq = (
+            dataset.read_sequence() if dataset is not None else analyzer.build_sequence(start, end, step, progress=show)
+        )
+        report = seq.continuity_report()
+        result.sequence_file = f"{out_dir}/sequence_lap{laps}.npz"
+        seq.save(result.sequence_file)
+        result.n_frames = seq.n_frames
+        print(f"  {seq}\n  {report.summary()}\nSaved dataset to: '{result.sequence_file}'")
+    result.continuity_ok = report.ok
+
+    if gif:
+        every = gif_every if gif_every > 0 else max(1, -(-result.n_frames // 300))
+        if dataset is not None:  # read only every n-th frame: memory stays small however long the race is
+            seq_gif, gif_step = dataset.read_sequence(0, None, every), every * step
+        else:
+            seq_gif, gif_step = seq.decimate(every), every * step
+        result.gif_file = f"{out_dir}/sequence_lap{laps}.gif"
+        animator = RaceAnimator(seq_gif, colors=analyzer.driver_colors(), title=f"{location} - laps {laps}")
+        animator.save_gif(result.gif_file, every=1, fps=fps, progress=show)
+        print(f"Saved animation to: '{result.gif_file}' ({seq_gif.n_frames} frames, {gif_step * fps:g}x real time)")
+    return result
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
     level = logging.DEBUG if args.verbose else logging.INFO
     logging.basicConfig(level=level, format="%(levelname)s %(name)s: %(message)s")
     # basicConfig does nothing if the root logger is already configured (notebooks, embedding): set our own level too
     logging.getLogger("f1strategy").setLevel(level)
+    if args.no_snapshots and not args.continuous:
+        parser.error("--no-snapshots would leave nothing to do: add --continuous")
+    if args.step is not None and args.hz is not None:
+        parser.error("use either --step or --hz, not both")
+    if args.hz is not None and args.hz <= 0:
+        parser.error("--hz must be positive")
     analyzer = SessionAnalyser(
         year=args.year,
         location=args.event,
@@ -146,17 +288,34 @@ def main(argv: Sequence[str] | None = None) -> int:
         drs_detection_offset_m=args.drs_detection_offset,
         cache_dir=args.cache_dir,
     )
-    run(
-        analyzer,
-        args.event,
-        args.lap,
-        out_dir=args.out_dir,
-        sectors=args.sectors,
-        max_tokens=args.max_tokens,
-        tables=not args.no_tables,
-        plots=not args.no_plots,
-        export=not args.no_export,
-    )
+    if not args.no_snapshots:
+        run(
+            analyzer,
+            args.event,
+            args.lap,
+            out_dir=args.out_dir,
+            sectors=args.sectors,
+            max_tokens=args.max_tokens,
+            tables=not args.no_tables,
+            plots=not args.no_plots,
+            export=not args.no_export,
+        )
+    if args.continuous:
+        first = args.from_lap if args.from_lap is not None else args.lap
+        run_continuous(
+            analyzer,
+            args.event,
+            first,
+            args.to_lap,
+            step_s=args.step,
+            out_dir=args.out_dir,
+            gif=not args.no_gif,
+            gif_every=args.gif_every,
+            fps=args.fps,
+            hz=args.hz,
+            dataset_format=args.dataset_format,
+            chunk_frames=args.chunk_frames,
+        )
     return 0
 
 

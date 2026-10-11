@@ -11,6 +11,7 @@ import pytest
 
 from f1strategy import cli
 from f1strategy.graph.exporter import TRACK_FEATURES
+from f1strategy.sequence.sampling import DEFAULT_CHUNK_FRAMES
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -25,6 +26,9 @@ class TestParser:
         assert (a.year, a.event, a.session, a.lap) == (2025, "Belgian Grand Prix", "R", 44)
         assert a.sectors == list(cli.SECTORS) and a.out_dir == "graphs" and a.spacing == 10.0 and a.max_tokens == 512
         assert not (a.no_tables or a.no_plots or a.no_export or a.verbose) and a.cache_dir is None
+        assert not (a.continuous or a.no_gif or a.no_snapshots)  # the point-by-point behaviour stays the default
+        assert (a.from_lap, a.to_lap, a.step, a.hz, a.gif_every, a.fps) == (None, None, None, None, 0, 10.0)
+        assert (a.dataset_format, a.chunk_frames) == ("parquet", DEFAULT_CHUNK_FRAMES)
 
     def test_overrides(self):
         a = cli.build_parser().parse_args(
@@ -72,6 +76,125 @@ class TestParser:
         with pytest.raises(SystemExit) as exc:
             cli.build_parser().parse_args(argv)
         assert exc.value.code == 2
+
+
+class TestContinuousMode:
+    def test_run_continuous_streams_a_parquet_dataset_and_a_gif_by_default(self, analyser, tmp_path, capsys):
+        res = cli.run_continuous(analyser, "Synthetic GP", 2, 3, step_s=1.0, out_dir=str(tmp_path))
+        assert Path(res.parquet_dir).name == "sequence_lap2-3" and Path(res.gif_file).name == "sequence_lap2-3.gif"
+        assert res.sequence_file is None and res.continuity_ok and res.n_frames > 100
+        out = capsys.readouterr().out
+        assert "Continuous mode: laps 2-3" in out and "continuity OK" in out and "100%" in out and "x real time" in out
+        assert "real telemetry: position 4.5 Hz, car data 4.2 Hz" in out and "Saved Parquet dataset" in out
+        from f1strategy import ParquetSequence
+
+        ds = ParquetSequence.open(res.parquet_dir)
+        assert ds.n_frames == res.n_frames and ds.step_s == 1.0
+
+    def test_npz_format_writes_the_single_file_only(self, analyser, tmp_path):
+        res = cli.run_continuous(analyser, "x", 3, out_dir=str(tmp_path), gif=False, dataset_format="npz")
+        assert res.parquet_dir is None and Path(res.sequence_file).name == "sequence_lap3.npz"
+        assert [p.name for p in tmp_path.iterdir()] == ["sequence_lap3.npz"]
+        from f1strategy import RaceSequence
+
+        assert RaceSequence.load(res.sequence_file).n_frames == res.n_frames
+
+    def test_both_formats_hold_identical_data(self, analyser, tmp_path):
+        res = cli.run_continuous(
+            analyser, "x", 3, out_dir=str(tmp_path), gif=False, dataset_format="both", chunk_frames=20
+        )
+        from f1strategy import RaceSequence
+
+        a, b = RaceSequence.load(res.sequence_file), RaceSequence.from_parquet(res.parquet_dir)
+        assert np.array_equal(a.driver_x, b.driver_x, equal_nan=True) and np.array_equal(a.track_flags, b.track_flags)
+
+    def test_hz_sets_the_data_rate_independently_of_the_gif_rate(self, analyser, tmp_path, capsys):
+        res = cli.run_continuous(analyser, "x", 3, hz=10, out_dir=str(tmp_path), fps=5, chunk_frames=200, gif_every=10)
+        from PIL import Image
+
+        from f1strategy import ParquetSequence
+
+        ds = ParquetSequence.open(res.parquet_dir)
+        assert ds.step_s == pytest.approx(0.1) and 560 < ds.n_frames < 600 and len(ds.manifest["chunks"]) == 3
+        with Image.open(res.gif_file) as im:
+            assert im.n_frames == -(-ds.n_frames // 10) and im.info["duration"] == 200
+        out = capsys.readouterr().out
+        assert "(10 Hz)" in out and "one frame every 0.1 s" in out and "interpolates between real samples" in out
+
+    def test_gif_speed_is_reported_for_the_decimated_dataset(self, analyser, tmp_path, capsys):
+        cli.run_continuous(analyser, "x", 3, hz=10, out_dir=str(tmp_path), gif_every=10, fps=5)
+        assert "5x real time" in capsys.readouterr().out  # 10 frames x 0.1 s x 5 fps
+
+    def test_a_single_lap_is_named_after_that_lap(self, analyser, tmp_path):
+        res = cli.run_continuous(analyser, "x", 3, out_dir=str(tmp_path), gif=False)
+        assert Path(res.parquet_dir).name == "sequence_lap3" and res.gif_file is None
+        assert [p.name for p in tmp_path.iterdir()] == ["sequence_lap3"]
+
+    def test_rerunning_replaces_the_previous_dataset(self, analyser, tmp_path):
+        cli.run_continuous(analyser, "x", 3, out_dir=str(tmp_path), gif=False, chunk_frames=20)
+        res = cli.run_continuous(analyser, "x", 3, out_dir=str(tmp_path), gif=False, chunk_frames=1000)
+        from f1strategy import ParquetSequence
+
+        assert len(ParquetSequence.open(res.parquet_dir).manifest["chunks"]) == 1
+
+    def test_gif_frame_count_is_automatically_capped(self, analyser, tmp_path):
+        from PIL import Image
+
+        res = cli.run_continuous(
+            analyser, "x", 2, 5, step_s=0.5, out_dir=str(tmp_path), dataset_format="npz"
+        )  # ~460 frames
+        with Image.open(res.gif_file) as im:
+            assert 150 <= im.n_frames <= 300 < res.n_frames
+
+    def test_the_gif_is_drawn_from_a_decimated_read_not_the_whole_dataset(self, analyser, tmp_path, monkeypatch):
+        from f1strategy.sequence import ParquetSequence
+
+        reads = []
+        original = ParquetSequence.read_sequence
+
+        def spy(self, start_frame=0, stop_frame=None, every=1):
+            reads.append(every)
+            return original(self, start_frame, stop_frame, every)
+
+        monkeypatch.setattr(ParquetSequence, "read_sequence", spy)
+        cli.run_continuous(analyser, "x", 2, 4, step_s=0.5, out_dir=str(tmp_path))
+        assert reads and reads[-1] > 1  # automatic decimation: never densifies the full dataset for the animation
+
+    def test_main_runs_both_modes_with_continuous(self, monkeypatch, analyser, tmp_path):
+        monkeypatch.setattr(cli, "SessionAnalyser", lambda **kw: analyser)
+        cli.main(["--lap", "3", "--out-dir", str(tmp_path), "--continuous", "--no-tables", "--no-gif"])
+        names = sorted(p.name for p in tmp_path.iterdir())
+        assert "sequence_lap3" in names and "graph_sector2.png" in names and "graph_lap3_sector2.npz" in names
+
+    def test_no_snapshots_runs_only_the_continuous_part(self, monkeypatch, analyser, tmp_path):
+        monkeypatch.setattr(cli, "SessionAnalyser", lambda **kw: analyser)
+        cli.main(["--lap", "3", "--out-dir", str(tmp_path), "--continuous", "--no-snapshots", "--no-gif"])
+        assert [p.name for p in tmp_path.iterdir()] == ["sequence_lap3"]
+
+    def test_lap_range_and_rate_options_are_forwarded(self, monkeypatch, analyser, tmp_path):
+        monkeypatch.setattr(cli, "SessionAnalyser", lambda **kw: analyser)
+        cli.main(["--lap", "9", "--from-lap", "2", "--to-lap", "3", "--hz", "0.5", "--format", "npz",
+                  "--out-dir", str(tmp_path), "--continuous", "--no-snapshots", "--no-gif"])  # fmt: skip
+        from f1strategy import RaceSequence
+
+        seq = RaceSequence.load(tmp_path / "sequence_lap2-3.npz")
+        assert seq.step_s == 2.0 and seq.times[0] == pytest.approx(analyser.graph_builder.lap_window(2)[0])
+
+    @pytest.mark.parametrize("argv", [["--no-snapshots"], ["--continuous", "--step", "1", "--hz", "10"],
+                                      ["--continuous", "--hz", "0"], ["--continuous", "--hz", "-5"]])  # fmt: skip
+    def test_invalid_combinations_fail_before_any_download(self, monkeypatch, argv):
+        def boom(**kw):
+            raise AssertionError("the session must not be loaded")
+
+        monkeypatch.setattr(cli, "SessionAnalyser", boom)
+        with pytest.raises(SystemExit) as exc:
+            cli.main(argv)
+        assert exc.value.code == 2
+
+    def test_continuous_is_off_by_default(self, monkeypatch, analyser, tmp_path):
+        monkeypatch.setattr(cli, "SessionAnalyser", lambda **kw: analyser)
+        cli.main(["--lap", "3", "--out-dir", str(tmp_path), "--no-tables", "--no-plots", "--no-export"])
+        assert list(tmp_path.iterdir()) == []
 
 
 class TestRun:

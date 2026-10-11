@@ -22,6 +22,7 @@ find optimal strategic decisions; this repository is the data foundation for tha
 - [Installation](#installation)
 - [Quick start](#quick-start)
 - [How it works](#how-it-works)
+- [Continuous data and animation](#continuous-data-and-animation)
 - [The graph schema](#the-graph-schema)
 - [Using the graph with a model](#using-the-graph-with-a-model)
 - [Command line reference](#command-line-reference)
@@ -47,6 +48,16 @@ find optimal strategic decisions; this repository is the data foundation for tha
 - **Global context.** Track status, DRS enabled/disabled, safety-car announcements, weather and race progress.
 - **Causal snapshots.** The graph at time *t* does not depend on data after *t* (see
   [Snapshots and causality](#snapshots-and-causality)); this is enforced by a test.
+- **Continuous data, up to 10 Hz.** The graph is sampled on a dense time grid (every second, or 10 times per second)
+  into a compact `RaceSequence`: static track data stored once, bit-packed flags, fixed driver slots, dense edge matrices; training
+  windows, exact frame reconstruction and a continuity check included.
+- **Honest about the telemetry rate.** FastF1's position and car data arrive at ~4.5 Hz each (merged ~8-9 Hz); a 10 Hz
+  grid interpolates between real samples, and every driver row carries `pos_age_s` / `car_age_s` (the age of the newest
+  real sample) so a model can tell real from interpolated values.
+- **Parquet export with Polars.** Races are streamed to a chunked Parquet dataset (bounded memory, ~54 000 frames at 10 Hz),
+  with masked values stored as real nulls; query it lazily with Polars or read any frame range back into a `RaceSequence`.
+- **Animated GIF** of the same arrays (flag-coloured track, cars with trails, leaderboard, flag banner), next to the
+  original point-by-point graphs and PNGs, which are unchanged.
 - **Model-ready export.** Fixed, named feature schema (one-hot, sin/cos, zero-filled with masks), optional
   normalisation, track pooling to fit a 512-token limit, token-type / position ids.
 - **Degrades gracefully** when FastF1 lacks circuit info, sector times, DRS data, weather or race-control messages.
@@ -75,11 +86,15 @@ with `--cache-dir` or the `F1_CACHE_DIR` environment variable). A full race with
 python main.py                                     # 2025 Belgian GP, race, lap 44 (the original example)
 f1-graph --year 2024 --event Monza --lap 30        # same as: python -m f1strategy ...
 f1-graph --lap 10 --sectors "Sector 2" --no-tables
+python main.py --continuous --from-lap 44 --to-lap 46    # + Parquet dataset and a GIF of laps 44-46 (1 frame/s)
+python main.py --continuous --hz 10 --from-lap 1 --to-lap 44 --no-snapshots --no-gif   # a whole race at 10 Hz
 ```
 
 For each requested sector it prints the lap tables, builds the graph at the moment the **leader** crosses that sector
 line, saves a plot (`graphs/graph_sector2.png`) and the model arrays (`graphs/graph_lap44_sector2.npz`).
-All options are listed in the [command line reference](#command-line-reference).
+With `--continuous` it additionally writes a Parquet dataset `graphs/sequence_lap44-46/` (or an `.npz` with
+`--format npz`) and `graphs/sequence_lap44-46.gif` (see [Continuous data and animation](#continuous-data-and-animation)). All options are listed in the
+[command line reference](#command-line-reference).
 
 ### Python
 
@@ -105,16 +120,18 @@ arrays = arrays.pool_track(suggest_pool_factor(len(arrays.track_x), len(arrays.d
 arrays.track_x.shape, arrays.driver_x.shape, arrays.global_x.shape
 ```
 
-A dataset is just many snapshots with an identical schema:
+For many snapshots in a row use the [continuous API](#continuous-data-and-animation):
 
 ```python
-import numpy as np
+from f1strategy import make_gif
 
-times = np.arange(600.0, 5400.0, 5.0)                       # every 5 s
-snapshots = [GraphExporter(normalise=True).export(analyser.build_graph_at_time(t)).pool_track(2) for t in times]
-np.savez_compressed("race.npz", track_x=np.stack([s.track_x for s in snapshots]),
-                    driver_x=np.stack([s.driver_x for s in snapshots]),
-                    global_x=np.stack([s.global_x for s in snapshots]))
+seq = analyser.build_sequence_for_laps(44, 46, hz=10)         # leader's laps 44-46 at 10 Hz, in memory
+print(seq.continuity_report().summary())
+seq.save("spa_44-46.npz")
+make_gif(seq, "spa_44-46.gif", colors=analyser.driver_colors(), every=5, fps=10)
+
+# a whole race does not fit in memory at 10 Hz: stream it to Parquet instead
+ds = analyser.write_sequence_parquet_for_laps("spa.ds", 1, 44, hz=10)
 ```
 
 The first snapshot of a session is slower: every driver's progress curve over the whole race is computed once and
@@ -201,7 +218,7 @@ representative laps (no in/out laps, none with SC / VSC / red), and the classifi
 `build_graph_at_time(t)` returns the graph of the whole race at session time `t`. `build_session_graph(lap, sector)`
 chooses `t` as the moment the **leader** of that lap crosses the sector line (or the lap start without a sector).
 
-A snapshot only uses information available at `t`: lap times of laps that have not finished are not used, pit stops are
+Continuous sequences inherit this, since every frame is such a snapshot. A snapshot only uses information available at `t`: lap times of laps that have not finished are not used, pit stops are
 a count of entries so far, DRS is "disabled" until a message enables it. `tests/integration/test_causality.py` builds each
 graph twice - from the full session and from one with everything after `t + 2 s` deleted - and requires identical
 results. Exceptions, stated honestly:
@@ -209,6 +226,196 @@ results. Exceptions, stated honestly:
 - Interpolation and velocity use the neighbouring samples, i.e. at most ~0.3 s beyond `t`.
 - The track layout and the DRS zones are static properties derived from the whole session.
 - `finished_or_retired` depends on the final lap timestamp of a driver; it is never true before that time + 5 s.
+
+## Continuous data and animation
+
+The graph is a function of session time, so *continuous* data is that function sampled densely. The sector
+snapshots (`build_session_graph`) are one coarse way of choosing `t`; they are kept as they were, and every frame of a
+continuous sequence goes through exactly the same code (`build` + `export`), so the two can never disagree.
+
+<p align="center">
+  <img src="docs/images/synthetic-race.gif" alt="Animation of a synthetic race: yellow flags, then a safety car" width="640"><br>
+  <em>The animation, rendered from a <strong>synthetic</strong> test circuit with six cars (a real-race GIF needs
+  network access to F1's servers): a yellow and a double yellow in two marshal sectors, DRS switching on, then the
+  safety car with a retired car marked OUT.</em>
+</p>
+
+### Sampling
+
+```python
+seq = analyser.build_sequence_for_laps(44, 46, step_s=1.0)                  # by lap window (leader's laps)
+seq = analyser.build_sequence(start_s=3600.0, end_s=3720.0, step_s=0.5)     # or by session time
+```
+
+| Step | Use |
+|---|---|
+| `hz=10` (0.1 s) | the finest useful resolution: a bit more than twice the real rate of each stream, see [below](#10-hz-and-the-real-telemetry-rate) |
+| above ~10 Hz | adds frames, no information |
+| 0.5 - 1 s | a good range for most sequence models |
+| 2 - 5 s | quick experiments, small datasets |
+
+Give either `step_s` or `hz` (never both).
+
+Cost, measured on the synthetic circuit with 714 track nodes and a 20-car grid: about 7-8 ms per frame on the dense path
+(about 20 ms through the full graph), i.e. roughly 7 minutes for a 90 minute race at 10 Hz; real data will differ, and
+the first frame also computes every driver's progress curve once. `analyser.iter_graphs(times)`
+yields the full networkx graphs lazily if you want the point-by-point objects instead. Under the hood
+`analyser.sequence_builder` (a `SequenceBuilder`) evaluates the graph on the grid made by `time_grid(start, end, step)`;
+both can be used directly.
+
+### 10 Hz and the real telemetry rate
+
+FastF1 delivers two *asynchronous* streams: position (X/Y/Z) about every 220 ms and car data (speed, throttle, brake,
+gear, RPM, DRS) about every 240 ms, i.e. roughly 4.5 Hz and 4.2 Hz. Both intervals are documented by FastF1 ("usually" 220 ms and 240 ms). Merging the two clocks, as FastF1's merged
+telemetry does, therefore gives roughly 8-9 samples per second (the sum of the two rates, ~8.7 Hz). The first lines of continuous mode print the rates **measured** on the session you load
+(`analyser.telemetry_rates()`).
+
+A 10 Hz grid therefore uses every real sample, but a frame usually falls *between* two samples, so its values are
+interpolated (linearly for continuous channels, nearest sample for gear / brake / DRS). Nothing is hidden: every driver
+row carries `pos_age_s` and `car_age_s`, the time since the newest real sample behind the value (0 exactly at a sample,
+at most about one sampling interval while data flows; on a 10 Hz grid the mean is about half an interval). A model can
+use them to learn how much to trust a value. Sampling faster than ~10 Hz only adds interpolated frames.
+
+### What is stored
+
+A `RaceSequence` is a set of arrays. Stacking full per-frame arrays would be wasteful (at one frame per second the
+track tokens alone would be 469 MB for a 90 minute race, and nearly all of it never changes), so:
+
+- **static track features** are stored once; everything except `flag_yellow`, `flag_double_yellow`, `flag_sc`, `flag_vsc`, `flag_vsc_ending`, `flag_red`, `n_drivers` is static;
+- the six flags `flag_yellow`, `flag_double_yellow`, `flag_sc`, `flag_vsc`, `flag_vsc_ending`, `flag_red` are **bit-packed** into one `uint8` per node and frame; `n_drivers` is derived;
+- **drivers sit in fixed slots** (alphabetical by code), so a car keeps its row across time; the live race position is
+  the `position` feature;
+- **proximity edges are dense** `[T, D, D]` matrices (`edge_exists` + `edge_attr`), the natural shape for an attention bias;
+- values are stored **raw** (physical units); normalisation and pooling are applied when a frame is read.
+
+Estimated in-memory size for a full race (the compressed `.npz` is smaller):
+
+| Array | Shape / dtype | Size |
+|---|---|---|
+| `track_flags` | `[T, N]` uint8 | 3.8 MB |
+| `driver_x` + `driver_mask` | `[T, D, 45]` float32 + bool | 24.3 MB |
+| `edge_attr` + `edge_attr_mask` + `edge_exists` | `[T, D, D, 7]` float32 + bool, `[T, D, D]` bool | 77.8 MB |
+| `global_x` + `global_mask` | `[T, 23]` | 0.6 MB |
+| `driver_to_track`, `driver_present`, `times` | `[T, D]`, `[T]` | 0.6 MB |
+| **Total** | T = 5400, D = 20, N = 695 | **107 MB** |
+
+### Parquet datasets (Polars)
+
+At 10 Hz a race is ~54 000 frames; as dense arrays that is about 1.1 GB for 20 cars, more than a pipeline
+should hold at once. `write_sequence_parquet` therefore **streams** the race into a dataset directory chunk by chunk, so
+memory stays bounded however long the race is: peak memory is about proportional to `chunk_frames` (measured on the
+synthetic race at roughly 0.1 MB per frame for a 20 car grid, i.e. ~200 MB at the default of 2000 frames), while
+throughput is about 7-8 ms per frame either way. The format is Parquet written and read with
+[Polars](https://pola.rs):
+
+```python
+ds = analyser.write_sequence_parquet_for_laps("spa.ds", 1, 44, hz=10, chunk_frames=2000, overwrite=True)
+ds = analyser.write_sequence_parquet("spa.ds", start_s=3600, end_s=3720, hz=10)    # or by session time
+print(ds)      # ParquetSequence(... frames, ... chunks, ... MB on disk)
+```
+
+| File | One row per | Content |
+|---|---|---|
+| `manifest.json` | - | schema, driver slots, chunk index; **written last**, a dataset without it refuses to open |
+| `track.parquet` | track node | the static track features |
+| `drivers/part-*.parquet` | frame and driver present | `frame`, `t`, `driver`, `slot`, `track_node` and all 45 driver features (about 1,080,000 rows for a 90 minute race at 10 Hz) |
+| `global/part-*.parquet` | frame | `frame`, `t`, the global features, and the flagged marshal sectors as lists (`yellow_sectors`, `double_yellow_sectors`) |
+| `edges/part-*.parquet` | proximity edge | `frame`, `t`, `src`, `dst` (+ slots), the edge features |
+
+Missing values are real Parquet **nulls** (the exporter's mask), never zeros that look like data. Parts are time ordered
+with statistics, so a query on `frame` or `t` skips the rest. Flags are stored compactly: a node is flagged when its
+marshal sector is in the frame's list, and SC / VSC / VSC ending / red are the global features `is_sc` / `is_vsc` /
+`is_vsc_ending` / `is_red`.
+
+```python
+import polars as pl
+from f1strategy import ParquetSequence
+
+ds = ParquetSequence.open("spa.ds")
+drivers = ds.scan_drivers()                                           # LazyFrame: nothing is read yet
+top = drivers.group_by("driver").agg(pl.col("speed_kmh").max()).sort("speed_kmh").collect()
+under_sc = drivers.join(ds.scan_global().select("frame", "is_sc"), on="frame").filter(pl.col("is_sc") == 1)
+smooth = drivers.sort("slot", "frame").with_columns(pl.col("speed_kmh").rolling_mean(10).over("driver"))
+
+seq = ds.read_sequence(start_frame=0, stop_frame=3000, every=1)       # a dense RaceSequence for a range ...
+lo, hi = ds.frame_range(start_s=3600, end_s=3720)                     # ... found by session time
+for chunk in ds.iter_chunks(2000):                                    # bounded-memory pass over the whole race
+    ...
+print(ds.continuity_report().summary())                               # the continuity check, evaluated by Polars
+```
+
+A sequence that is already in memory can be written with `seq.to_parquet(path)` (which calls `write_dataset`), and
+`ParquetSequenceWriter` can be driven chunk by chunk yourself (`with ParquetSequenceWriter(path) as w: w.append(chunk)`).
+
+`read_sequence` returns exactly the `RaceSequence` that was written (every array is equal, a test checks it), so
+`frame()`, `windows()` and the animation work on a dataset read back in pieces.
+
+### Reading it back
+
+```python
+from f1strategy import RaceSequence
+
+seq = RaceSequence.load("spa_44-46.npz")
+frame = seq.frame(120, normalise=True, pool=2)         # GraphArrays: exactly what the exporter produces for that time
+
+for window in seq.windows(length=30, stride=10):       # sliding windows for a sequence model
+    frames = list(window.frames(normalise=True, pool=2))
+    track = np.stack([f.track_x for f in frames])      # [30, N_pooled, F_track]
+    drivers = np.stack([f.driver_x for f in frames])   # [30, D, F_driver]
+```
+
+`frame(i)` is identical to `GraphExporter().export(analyser.build_graph_at_time(t_i))` - a test checks every array.
+`seq.slice(a, b)` returns views, not copies. The file format is versioned, and the flag bit layout is stored in the file
+and checked on load.
+
+### What "continuous" means here
+
+- **Smooth quantities** (positions, speeds, gaps, progress) are interpolated, so they change smoothly from frame to frame.
+- **Wrap-around is encoded safely.** `track_s_m` and `lap_fraction` jump from the end of the lap to 0 at the
+  start/finish line; `lap_fraction_sin` / `lap_fraction_cos` do not, and `progress_m` grows monotonically. Headings are
+  sin/cos pairs for the same reason.
+- **Discrete quantities change in steps** by nature: flags, race positions, pit state, proximity edges (they appear when
+  a gap crosses 5 s or 50 m), the DRS window. Values that are undefined at a moment (e.g. a gap to a car a lap away) are
+  masked, and the mask toggles accordingly.
+- **A sequence can check itself.** `seq.continuity_report()` returns a `ContinuityReport` that flags a car that moves further between two frames than its
+  speed allows (a teleport: bad data or a wrong time step) and race progress running backwards, and counts start/finish
+  crossings. On the synthetic race the largest observed step is 1.01 times what the car's speed implies.
+
+### Animation
+
+```python
+from f1strategy import RaceAnimator
+
+anim = RaceAnimator(seq, colors=analyser.driver_colors(), title="2025 Belgian GP")
+anim.save_gif("race.gif", every=2, fps=10)       # looping GIF
+anim.save_png(120, "frame.png")                  # a single frame
+rgb = anim.render(120)                           # [H, W, 3] uint8, e.g. to feed ffmpeg / imageio for an MP4
+```
+
+It is drawn from the sequence arrays, i.e. from the numbers a model is trained on. Static elements are drawn once; per
+frame only colours, positions and texts change. All frames of a GIF share **one palette**, so flag colours do not
+flicker. Cars use team colours when `session.results` has them (a fixed palette otherwise): `analyser.driver_colors()`
+is `team_colors(session, codes)`.
+
+| Parameter | Meaning |
+|---|---|
+| `every` | use every n-th frame; playback speed is `every x step_s x fps` times real time |
+| `fps` | GIF frame rate (GIF delays have 10 ms resolution; browsers clamp very fast GIFs) |
+| `max_frames` | guard (default 800): a GIF holds all frames in memory while it is written, so a longer one raises with a suggested `every` |
+| `palette_colors` | size of the shared palette, 2-256 |
+
+The command line picks `every` automatically so the GIF has at most 300 frames; with a Parquet dataset it draws the
+GIF from a *decimated read* (`read_sequence(every=n)`), so a long 10 Hz race is never loaded in full.
+
+### The point-by-point logic is unchanged
+
+```python
+G = analyser.build_session_graph(44, "Sector 2")                    # a sector snapshot, as before
+for G in analyser.iter_graphs(times):                               # ...or a graph per frame
+    plot_race_graph(G, f"frame_{G.graph['time_s']:.0f}.png")        # the original PNG plot
+```
+
+`python main.py` without `--continuous` behaves exactly as before.
 
 ## The graph schema
 
@@ -289,7 +496,9 @@ on the graph, except the derived ones (one-hots, sin/cos). They are checked agai
 | `drs_open` | DRS flap open (raw DRS channel 10, 12 or 14). |
 | `drs_eligible` | Raw DRS channel equals 8 ("detected / eligible"; semantics are not officially documented). |
 | `track_s_m` | Distance from the start/finish line of the car's projection onto the centre line, metres. |
-| `lap_fraction` | `track_s_m` divided by the track length. |
+| `lap_fraction` | `track_s_m` divided by the track length (jumps from 1 to 0 at the start/finish line). |
+| `lap_fraction_sin` | `sin(2 pi lap_fraction)`: the wrap-safe encoding of the lap position, continuous across the line. |
+| `lap_fraction_cos` | `cos(2 pi lap_fraction)`. |
 | `lateral_offset_m` | Signed distance from the reference line, metres (+ = left). |
 | `progress_m` | Cumulative race distance (laps x length + position); 0 at the line at lights-out, grid slots are slightly negative. |
 | `lap_number` | Lap the car is on, from the timing table. |
@@ -304,6 +513,8 @@ on the graph, except the derived ones (one-hots, sin/cos). They are checked agai
 | `pit_stops` | Pit lane entries so far (a pure count of entries up to the snapshot time). |
 | `in_pit` | Car is in the pit lane right now (between pit entry and the next lap's pit exit). |
 | `on_track` | Position feed status is not `OffTrack`. |
+| `pos_age_s` | Seconds since the newest *real* position sample behind this row (0 exactly at a sample, up to ~0.22 s; NaN before the first sample, grows if the stream stops). |
+| `car_age_s` | Same for the car-data stream (speed, throttle, ...; ~0.24 s interval). |
 | `pace_last3_s` | Mean of the last three completed representative laps (no in/out laps, none with SC/VSC/red), seconds. |
 | `last_lap_time_s` | Time of the last completed lap, seconds. |
 | `finished_or_retired` | More than 5 s have passed since the car's final lap timestamp. |
@@ -422,14 +633,25 @@ Not included yet: an attention mask encoding the ring / driver-to-track structur
 | `--year` | 2025 | Season. |
 | `--event` | `Belgian Grand Prix` | Event name (fuzzy-matched by FastF1) or, if all digits, the round number. |
 | `--session` | `R` | Session identifier: `R`, `Q`, `S`, `SQ`, `FP1`... |
-| `--lap` | 44 | Lap whose sector crossings define the snapshots (taken when the **leader** crosses the sector line). |
+| `--lap` | 44 | Lap whose sector crossings define the sector snapshots (taken when the **leader** crosses the sector line). |
 | `--sectors` | all three | Any of `"Sector 1"` `"Sector 2"` `"Sector 3"`. |
 | `--out-dir` | `graphs` | Where PNGs and `.npz` files go. |
 | `--spacing` | 10 | Track node spacing in metres. |
 | `--max-tokens` | 512 | Token budget used to choose the track pooling factor. |
 | `--drs-detection-offset` | none | Estimate DRS detection points as *zone start minus this many metres*. |
 | `--cache-dir` | `$F1_CACHE_DIR` or `~/fastf1_cache` | FastF1 cache directory. |
-| `--no-tables` | off | Skip the console tables. |
+| `--continuous` | off | **Continuous mode**: also sample the race graph densely over a lap window, save it and render a GIF. |
+| `--from-lap` | `--lap` | First lap of the continuous window (starts when the leader starts it). |
+| `--to-lap` | `--from-lap` | Last lap of the window (ends when the leader completes it). |
+| `--step` | 1.0 | Seconds between two frames (or give `--hz`). |
+| `--hz` | none | Frames per second of *data*, e.g. `10`; an alternative to `--step` (not the GIF rate: that is `--fps`). |
+| `--format` | `parquet` | Dataset format: `parquet` (a directory, streamed in chunks), `npz` (one file, in memory) or `both`. |
+| `--chunk-frames` | 2000 | Frames per Parquet part / in-memory chunk; this is what bounds the memory use. |
+| `--gif-every` | auto | Use every n-th frame in the GIF; automatic means at most 300 frames. |
+| `--fps` | 10 | Playback frames per second of the GIF. |
+| `--no-gif` | off | Continuous mode: write only the dataset, no GIF. |
+| `--no-snapshots` | off | Skip the sector snapshots (tables, plots, npz); needs `--continuous`. |
+| `--no-tables` | off | Skip the console tables (sector snapshots). |
 | `--no-plots` | off | Skip the PNG plots. |
 | `--no-export` | off | Skip the `.npz` export. |
 | `--verbose` | off | Debug logging (`-v`). |
@@ -465,6 +687,15 @@ Not included yet: an attention mask encoding the ring / driver-to-track structur
 - **FastF1 versions.** `fastf1>=3.4` is declared; the API surface used was inspected against FastF1 3.8.3 and the real
   run used a current release. The offline tests inject the session instead of importing FastF1, so older FastF1
   releases are only checked at install level.
+- **Continuous mode on real races.** It is covered by synthetic tests (including exact equality with the point-by-point
+  exporter and a continuity check), but I could not run it on a real race from the development environment: run
+  `python main.py --continuous` once and read the printed continuity report; `tests/live` contains matching checks.
+- **Parquet datasets on real races** are covered by exact round-trip tests on synthetic data (every array equal, masks as
+  nulls, chunk boundaries, Polars queries) but have not yet been written for a real 10 Hz race here; `tests/live`
+  contains matching checks. The `edges` table grows with how many cars run within 5 s / 50 m of each other.
+- **10 Hz is interpolated.** The real streams are ~4.5 Hz; see [10 Hz and the real telemetry rate](#10-hz-and-the-real-telemetry-rate).
+- **GIFs live in memory while they are written** (8-bit frames), hence the `max_frames` guard; use `every` or a shorter
+  window for long races. There is no built-in video encoder; `render(i)` gives you the frames.
 - **Verification status.** The logic is covered by several hundred tests on a synthetic session with known ground truth.
   The full pipeline has been run on real data for the 2025 Belgian Grand Prix (695 nodes, 20 drivers). Other circuits and
   seasons are expected to work but have not been checked individually - the [live tests](#live-tests) are meant to grow
@@ -485,13 +716,19 @@ ruff check . && ruff format --check .      # lint + format
 | Tier | Where | What |
 |---|---|---|
 | Unit | `tests/unit` | One module at a time: geometry on analytic shapes (a circle has a known curvature), race-control replay, telemetry interpolation, anchoring, timing, exporter, plotting, CLI helpers. Includes property-based tests (hypothesis). |
-| Integration | `tests/integration` | End to end: dataset assembly, determinism, **causality**, CLI. |
+| Integration | `tests/integration` | End to end: dataset assembly, determinism, **causality**, continuous workflow (file -> windows -> tensors -> GIF), CLI. |
 | Live | `tests/live` | The real FastF1 API on the 2025 Belgian GP. Deselected by default. |
 
 All offline tests run against `tests/synthetic/session.py`: a synthetic session that mimics FastF1's structure (column
 names, units, dtypes, quirks such as all-zero position samples and the separate clocks) around a circuit with *exactly
 known* geometry, positions, gaps, flags, a pit stop, a retirement, an SC, a VSC and DRS windows. Each data source can be
 switched off to test degraded input. Warnings are treated as errors.
+
+### Documentation
+
+`README.md` is generated: the feature tables, the command line table and the storage table come from the code. Edit
+`docs/readme_template.md` and run `python scripts/generate_readme.py` (`--check` verifies); a test fails when the README is
+stale.
 
 ### Live tests
 
@@ -512,12 +749,15 @@ workflow rather than on every push. Their reference values come from a real run 
 Formula-1/
 ├── main.py                       launcher: python main.py (works without installing)
 ├── pyproject.toml                packaging, dependencies, pytest / ruff / coverage config
+├── scripts/
+│   └── generate_readme.py        renders README.md from docs/readme_template.md
 ├── src/f1strategy/
 │   ├── __init__.py               public API, __version__
 │   ├── __main__.py               python -m f1strategy
 │   ├── cli.py                    command line interface
 │   ├── session.py                SessionAnalyser: loads the session, builds components, facade
-│   ├── plotting.py               track map of a race graph
+│   ├── plotting.py               track map of a race graph (PNG)
+│   ├── animation.py              RaceAnimator: GIF from a RaceSequence
 │   ├── reporting.py              console tables
 │   ├── utils.py                  units, position cleaning, circular runs, time formatting
 │   ├── domain/
@@ -530,11 +770,16 @@ Formula-1/
 │   ├── telemetry/
 │   │   ├── store.py              TelemetryStore: interpolation, progress, gaps
 │   │   └── timing.py             DriverTiming: tyres, pits, pace
-│   └── graph/
-│       ├── builder.py            RaceGraphBuilder: networkx graph at a time
-│       └── exporter.py           GraphExporter / GraphArrays: fixed-schema arrays
+│   ├── graph/
+│   │   ├── builder.py            RaceGraphBuilder: networkx graph at a time
+│   │   └── exporter.py           GraphExporter / GraphArrays: fixed-schema arrays
+│   └── sequence/
+│       ├── sampling.py           time_grid
+│       ├── builder.py            SequenceBuilder: dense (graph-free) frames, chunked
+│       ├── dataset.py            RaceSequence: compact continuous dataset
+│       └── parquet.py            ParquetSequenceWriter / ParquetSequence (Polars)
 ├── tests/                        unit/, integration/, live/, synthetic/
-├── docs/images/                  figures used in this README
+├── docs/                         readme_template.md and the figures used in the README
 └── .github/workflows/            ci.yml, live-data.yml
 ```
 <!-- END:project-structure -->
@@ -554,6 +799,17 @@ Formula-1/
 | `SessionAnalyserClass.py` | `f1strategy/session.py` | `from f1strategy import SessionAnalyser` |
 | `main.py` | `f1strategy/cli.py` (+ thin `main.py`) | `python main.py` still works |
 
+Changes in 0.4.0 (10 Hz and Parquet): two new driver features (`pos_age_s`, `car_age_s`, so 45 in total),
+`RaceGraphBuilder.snapshot()` (plain data; `build()` now wraps it and returns the same graph), `GraphExporter.export_snapshot()`
+and `FrameRecord`, a graph-free sampling path that is bit-for-bit equal to the graph path, `hz=` everywhere, Parquet
+export / import (`polars` is now a dependency), and `--format parquet` is the default for `--continuous`
+(`--step` now defaults to unset, meaning 1 s unless `--hz` is given). `FLAG_BITS` lives in `f1strategy.graph.exporter`
+(still importable from `f1strategy.sequence.dataset`).
+
+Changes in 0.3.0 (continuous data): normalisation moved into `GraphArrays.normalised_copy()` (the exporter output with
+`normalise=True` is unchanged), `GraphArrays` gained `xy_bbox`, `race_distance_m` and `normalised`, two driver features
+were added (`lap_fraction_sin`, `lap_fraction_cos`), and Pillow became a direct dependency.
+
 Behaviour changes since the first graph version: pit stops are now a pure count of pit-lane entries up to `t`;
 `drs_enabled` is `False` (not unknown) until a message enables DRS whenever a race-control feed exists; the normalised
 `progress_m` is scaled by the race distance; pooling keeps the mask in the pooled shape.
@@ -563,6 +819,8 @@ Behaviour changes since the first graph version: pit stops are now a pure count 
 - Per-driver blue flags and penalties from the race-control text.
 - Training targets (e.g. "pit within the next N laps", position changes) and a PyTorch `Dataset` on top of the arrays.
 - An attention mask encoding the ring and driver-to-track structure.
+- Parallel chunk building across processes for very long, fast-sampled stretches.
+- Event-driven sampling (denser frames around pit stops, overtakes and flag changes).
 - Qualifying and sprint specifics; datasets spanning several races.
 - More live-test circuits.
 

@@ -16,17 +16,26 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from typing import Any
 
 import networkx as nx
 import numpy as np
 import pandas as pd
 
+from f1strategy.animation import team_colors
 from f1strategy.domain.driver import DriverNode
 from f1strategy.domain.sector import SectorNode
 from f1strategy.graph.builder import RaceGraphBuilder
 from f1strategy.racecontrol.timeline import RaceControlTimeline
+from f1strategy.sequence import (
+    ParquetSequence,
+    ParquetSequenceWriter,
+    RaceSequence,
+    SequenceBuilder,
+    time_grid,
+)
+from f1strategy.sequence.sampling import DEFAULT_CHUNK_FRAMES
 from f1strategy.telemetry.store import TelemetryStore
 from f1strategy.telemetry.timing import DriverTiming
 from f1strategy.track.model import TrackModel
@@ -91,6 +100,7 @@ class SessionAnalyser:
         self.graph_builder = RaceGraphBuilder(
             self.session, self.track, self.telemetry, self.timing, self.timeline, self._driver_map
         )
+        self.sequence_builder = SequenceBuilder(self.graph_builder)
 
     @classmethod
     def from_session(cls, session: Any, **kwargs: Any) -> SessionAnalyser:
@@ -314,6 +324,100 @@ class SessionAnalyser:
             drivers.append(driver_obj)
 
         return drivers
+
+    # ------------------------------------------------------------------ continuous data
+    def telemetry_rates(self) -> dict[str, float]:
+        """Median *real* sampling rates in Hz over all drivers: ``position_hz``, ``car_hz`` and ``merged_hz`` (an
+        estimate for the union of both clocks, which is what FastF1's merged telemetry has).
+
+        Sampling the graph faster than these rates interpolates between real samples; the ``pos_age_s`` and
+        ``car_age_s`` driver features say how old the newest real sample behind a value is."""
+        rates = list(self.telemetry.native_rates().values())
+
+        def median(values: list[float]) -> float:
+            finite = [v for v in values if np.isfinite(v)]  # a missing stream gives NaN, not a NumPy warning
+            return float(np.median(finite)) if finite else float("nan")
+
+        pos, car = median([r[0] for r in rates]), median([r[1] for r in rates])
+        return {"position_hz": pos, "car_hz": car, "merged_hz": pos + car}
+
+    def build_sequence(
+        self,
+        start_s: float,
+        end_s: float,
+        step_s: float | None = None,
+        progress: Callable[[int, int], None] | None = None,
+        *,
+        hz: float | None = None,
+    ) -> RaceSequence:
+        """Continuous data: the race sampled every ``step_s`` seconds (or ``hz`` times per second; default 1 s) from
+        ``start_s`` to ``end_s`` (session time), packed into one in-memory :class:`~f1strategy.sequence.RaceSequence`.
+        For long stretches at high rates use :meth:`write_sequence_parquet` instead."""
+        return self.sequence_builder.build(time_grid(start_s, end_s, step_s, hz), progress=progress)
+
+    def build_sequence_for_laps(
+        self,
+        first_lap: int,
+        last_lap: int | None = None,
+        step_s: float | None = None,
+        progress: Callable[[int, int], None] | None = None,
+        *,
+        hz: float | None = None,
+    ) -> RaceSequence:
+        """Like :meth:`build_sequence`, from the moment the leader starts ``first_lap`` until the leader completes
+        ``last_lap`` (default: just ``first_lap``)."""
+        start, end = self.graph_builder.lap_window(first_lap, last_lap)
+        return self.build_sequence(start, end, step_s, progress, hz=hz)
+
+    def write_sequence_parquet(
+        self,
+        path: str,
+        start_s: float,
+        end_s: float,
+        step_s: float | None = None,
+        *,
+        hz: float | None = None,
+        chunk_frames: int = DEFAULT_CHUNK_FRAMES,
+        overwrite: bool = False,
+        progress: Callable[[int, int], None] | None = None,
+    ) -> ParquetSequence:
+        """Stream the race, sampled every ``step_s`` seconds (or at ``hz``), into a Parquet dataset directory.
+
+        Frames are produced and written in chunks of ``chunk_frames`` so memory stays bounded however long the
+        stretch is (a 90 minute race at 10 Hz is ~54 000 frames). Open the result with
+        :class:`~f1strategy.sequence.ParquetSequence` / Polars (``scan_drivers()`` ...)."""
+        grid = time_grid(start_s, end_s, step_s, hz)
+        with ParquetSequenceWriter(path, overwrite=overwrite) as writer:
+            for chunk in self.sequence_builder.build_chunks(grid, chunk_frames, progress=progress):
+                writer.append(chunk)
+        return ParquetSequence.open(path)
+
+    def write_sequence_parquet_for_laps(
+        self,
+        path: str,
+        first_lap: int,
+        last_lap: int | None = None,
+        step_s: float | None = None,
+        *,
+        hz: float | None = None,
+        chunk_frames: int = DEFAULT_CHUNK_FRAMES,
+        overwrite: bool = False,
+        progress: Callable[[int, int], None] | None = None,
+    ) -> ParquetSequence:
+        """:meth:`write_sequence_parquet` over the leader's laps ``first_lap`` to ``last_lap``."""
+        start, end = self.graph_builder.lap_window(first_lap, last_lap)
+        return self.write_sequence_parquet(
+            path, start, end, step_s, hz=hz, chunk_frames=chunk_frames, overwrite=overwrite, progress=progress
+        )
+
+    def driver_colors(self) -> dict[str, str]:
+        """``code -> '#rrggbb'`` team colours for plots and animations (fallback palette if unavailable)."""
+        return team_colors(self.session, sorted(self._driver_map.values()))
+
+    def iter_graphs(self, times: Iterable[float]) -> Iterator[nx.DiGraph]:
+        """Lazily yield the full networkx graph for each time - the point-by-point logic, frame after frame
+        (e.g. to save a PNG per frame with :func:`f1strategy.plotting.plot_race_graph`)."""
+        return self.sequence_builder.iter_graphs(times)
 
     def build_graph_at_time(self, session_time_s: float) -> nx.DiGraph:
         """Race graph at an arbitrary session time (seconds since the start of the data stream)."""

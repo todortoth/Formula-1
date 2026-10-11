@@ -58,6 +58,8 @@ class DriverSample:
     track_s_m: float
     lateral_offset_m: float
     progress_m: float
+    pos_age_s: float = float("nan")  # time since the last *real* position sample (NaN before the first one)
+    car_age_s: float = float("nan")  # time since the last real car-data sample (NaN if there is none)
 
 
 class TelemetryStore:
@@ -152,6 +154,20 @@ class TelemetryStore:
         t_ahead = self.time_at_progress(ahead, self.progress_at(behind, t))
         return _NAN if np.isnan(t_ahead) else t - t_ahead
 
+    def native_rates(self) -> dict[str, tuple[float, float]]:
+        """``code -> (position Hz, car data Hz)``: the median *real* sampling rates (NaN if a stream is missing).
+
+        Frames sampled faster than these rates interpolate between real samples; ``pos_age_s`` / ``car_age_s`` on
+        every driver node say how old the newest real sample behind a value is."""
+
+        def rate(t: np.ndarray) -> float:
+            return float(1.0 / np.median(np.diff(t))) if len(t) > 2 else float("nan")
+
+        return {
+            c: (rate(self._pos[c]["t"]), rate(self._car[c]["t"]) if c in self._car else float("nan"))
+            for c in self.codes
+        }
+
     def sample(self, code: str, t: float, velocity_dt: float = 0.3) -> DriverSample:
         p = self._pos[code]
         tp = p["t"]
@@ -184,6 +200,8 @@ class TelemetryStore:
         else:
             speed = v_pos * 3.6
 
+        pos_age = _age(tp, t)
+        car_age = _age(c["t"], t) if c is not None else float("nan")
         return DriverSample(
             code=code,
             t=t,
@@ -206,4 +224,12 @@ class TelemetryStore:
             track_s_m=proj_s,
             lateral_offset_m=proj_lat,
             progress_m=self.progress_at(code, t),
+            pos_age_s=pos_age,
+            car_age_s=car_age,
         )
+
+
+def _age(times: np.ndarray, t: float) -> float:
+    """Seconds since the newest sample at or before ``t`` (NaN if there is none yet). Purely causal."""
+    i = int(np.searchsorted(times, t, side="right")) - 1
+    return float(t - times[i]) if i >= 0 else float("nan")

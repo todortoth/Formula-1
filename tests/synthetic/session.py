@@ -29,6 +29,13 @@ DRIVERS = [  # code, number, pace factor, start offset behind the line (m), comp
     ("ALO", "14", 0.990, 40.0, "MEDIUM", "HARD"),
     ("SAI", "55", 0.985, 48.0, "HARD", "HARD"),
 ]
+EXTRA_DRIVERS = [  # joined behind the six main cars when n_drivers > 6 (14 more -> a 20 car grid)
+    (code, number, 0.984 - 0.001 * k, 56.0 + 8.0 * k, "MEDIUM", "HARD")
+    for k, (code, number) in enumerate(
+        [("PIA", "81"), ("RUS", "63"), ("GAS", "10"), ("ALB", "23"), ("TSU", "22"), ("OCO", "31"), ("STR", "18"),
+         ("HUL", "27"), ("BOR", "5"), ("HAD", "6"), ("LAW", "30"), ("BEA", "87"), ("COL", "43"), ("ANT", "12")]
+    )
+]  # fmt: skip
 SECTOR_FRACS = (0.33, 0.68)
 DRS_ZONES_FRAC = [(0.05, 0.15), (0.55, 0.62)]
 MARSHAL_MARKERS_FRAC = [
@@ -89,8 +96,13 @@ def make_synthetic_session(
     with_messages: bool = True,
     with_track_status: bool = True,
     with_sector_times: bool = True,
+    n_drivers: int = 6,
 ) -> SimpleNamespace:
-    """Build the synthetic session. The keyword flags switch off one data source each, to test degraded input."""
+    """Build the synthetic session. The keyword flags switch off one data source each, to test degraded input;
+    ``n_drivers`` (6-20) adds back markers for realistic scale."""
+    if not 6 <= n_drivers <= 6 + len(EXTRA_DRIVERS):
+        raise ValueError(f"n_drivers must be between 6 and {6 + len(EXTRA_DRIVERS)}")
+    drivers_list = DRIVERS + EXTRA_DRIVERS[: n_drivers - 6]
     rng = np.random.default_rng(seed)
     drs_on = with_drs
     L, s_dense, X, Y, Z, v, kappa = _build_track()
@@ -100,7 +112,7 @@ def make_synthetic_session(
     retire_s = 3.4 * L  # SAI stops here
 
     # ---- motion model: cumulative distance S(t) per driver by integrating dt = ds / v
-    for code, number, pace, off, c1, c2 in DRIVERS:
+    for code, number, pace, off, c1, c2 in drivers_list:
         s_grid = np.arange(-off, (N_LAPS + 1) * L, 1.0)
         dt = 1.0 / (per(v, s_grid) * pace)
         t_grid = RACE_START + np.concatenate([[0.0], np.cumsum(dt[:-1])])
@@ -113,7 +125,7 @@ def make_synthetic_session(
     t_total = max(t_end_driver.values()) + 20.0
 
     # ---- position + car data streams
-    for code, number, pace, off, c1, c2 in DRIVERS:
+    for code, number, pace, off, c1, c2 in drivers_list:
         tp = np.arange(0.0, t_total, 0.22) + rng.uniform(-0.01, 0.01, int(np.ceil(t_total / 0.22)))
         tp = np.sort(tp[tp >= 0])
         S = S_fn[code](tp)
@@ -184,12 +196,12 @@ def make_synthetic_session(
             lo, hi = (mid, hi) if Sf(mid) < S_target else (lo, mid)
         return hi
 
-    for code, *_ in DRIVERS:  # lap k ends when the cumulative distance reaches k * L (if the car got that far)
+    for code, *_ in drivers_list:  # lap k ends when the cumulative distance reaches k * L (if the car got that far)
         for k in range(1, N_LAPS + 1):
             if S_fn[code](t_end_driver[code]) >= k * L - 1e-6:
                 lap_end_times[k][code] = t_at_S(code, k * L)
 
-    for code, number, pace, off, c1, c2 in DRIVERS:
+    for code, number, pace, off, c1, c2 in drivers_list:
         prev_end = RACE_START
         for k in range(1, N_LAPS + 1):
             end = lap_end_times[k].get(code)
@@ -328,9 +340,9 @@ def make_synthetic_session(
         t0_date=T0_DATE,
         total_laps=N_LAPS,
         session_start_time=_td(RACE_START),
-        drivers=[d[1] for d in DRIVERS],
+        drivers=[d[1] for d in drivers_list],
         event={"EventName": "Synthetic Grand Prix"},
-        get_driver=lambda n: {"Abbreviation": {d[1]: d[0] for d in DRIVERS}[n]},
+        get_driver=lambda n: {"Abbreviation": {d[1]: d[0] for d in drivers_list}[n]},
         get_circuit_info=(lambda: circuit_info) if with_circuit_info else _no_circuit_info,
     )
 

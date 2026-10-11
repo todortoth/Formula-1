@@ -63,6 +63,8 @@ class DriverNode:
     lap_number: int = 0
     lap_fraction: float = _NAN
     on_track: bool = True  # FastF1 position Status == 'OnTrack'
+    pos_age_s: float = _NAN  # seconds since the last real position sample (see TelemetryStore.native_rates)
+    car_age_s: float = _NAN  # seconds since the last real car-data sample
 
     # --- timing / strategy ---
     gap_to_leader_s: float = _NAN
@@ -78,4 +80,7 @@ class DriverNode:
 
     def to_attributes(self) -> dict[str, Any]:
         """Flat dict of node attributes (everything except container/object fields)."""
-        return {f.name: getattr(self, f.name) for f in fields(self) if f.name not in _NON_FEATURE_FIELDS}
+        return {name: getattr(self, name) for name in _ATTRIBUTE_NAMES}
+
+
+_ATTRIBUTE_NAMES = tuple(f.name for f in fields(DriverNode) if f.name not in _NON_FEATURE_FIELDS)

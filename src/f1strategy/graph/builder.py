@@ -29,6 +29,7 @@ Graph level (``G.graph``): ``time_s``, ``global`` (track status, SC/VSC, DRS ena
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any
 
 import networkx as nx
@@ -49,6 +50,17 @@ DRS_WINDOW_S = 1.0  # a follower within 1 s of the car ahead may use DRS (approx
 
 def track_node_id(k: int) -> str:
     return f"T{k:04d}"
+
+
+@dataclass
+class Snapshot:
+    """The race at one instant as plain data (see :meth:`RaceGraphBuilder.snapshot`)."""
+
+    time_s: float
+    race_control: RaceControlState
+    drivers: list[DriverNode]  # leader first
+    global_features: dict[str, Any]
+    edges: list[tuple[int, int, dict[str, Any]]]  # directed proximity edges, indices into ``drivers``
 
 
 class RaceGraphBuilder:
@@ -76,15 +88,19 @@ class RaceGraphBuilder:
         self._weather = self._prepare_weather(session)
 
     # ------------------------------------------------------------------ snapshot time
+    def _leader_row(self, lap: int) -> pd.Series:
+        """Lap-table row of the race leader for ``lap`` (first row if nobody is classified first)."""
+        laps = self.session.laps
+        rows = laps[laps["LapNumber"] == lap]
+        if rows.empty:
+            raise ValueError(f"No data for lap {lap}")
+        leader = rows[rows["Position"] == 1]
+        return leader.iloc[0] if not leader.empty else rows.iloc[0]
+
     def snapshot_time(self, target_lap: int, sector_name: str | None = None) -> float:
         """Session time at which the leader of ``target_lap`` crosses ``sector_name`` ("Sector 1".."Sector 3");
         without a sector the moment the leader starts that lap."""
-        laps = self.session.laps
-        rows = laps[laps["LapNumber"] == target_lap]
-        if rows.empty:
-            raise ValueError(f"No data for lap {target_lap}")
-        leader = rows[rows["Position"] == 1]
-        row = leader.iloc[0] if not leader.empty else rows.iloc[0]
+        row = self._leader_row(target_lap)
         column = {
             "Sector 1": "Sector1SessionTime",
             "Sector 2": "Sector2SessionTime",
@@ -96,6 +112,19 @@ class RaceGraphBuilder:
         if pd.isna(value):
             raise ValueError(f"Lap {target_lap}: no timestamp for '{sector_name or 'lap start'}'")
         return float(pd.Timedelta(value).total_seconds())
+
+    def lap_window(self, first_lap: int, last_lap: int | None = None) -> tuple[float, float]:
+        """Session time span ``(start, end)`` from the moment the leader starts ``first_lap`` to the moment the
+        leader completes ``last_lap`` (default: the same lap). The basis for continuous sampling."""
+        last_lap = first_lap if last_lap is None else last_lap
+        if last_lap < first_lap:
+            raise ValueError(f"last_lap ({last_lap}) is before first_lap ({first_lap})")
+        start = self._leader_row(first_lap)["LapStartTime"]
+        row = self._leader_row(last_lap)
+        end = row["Time"] if pd.notna(row["Time"]) else row["Sector3SessionTime"]
+        if pd.isna(start) or pd.isna(end):
+            raise ValueError(f"Laps {first_lap}-{last_lap}: the leader has no start / end timestamp")
+        return float(pd.Timedelta(start).total_seconds()), float(pd.Timedelta(end).total_seconds())
 
     # ------------------------------------------------------------------ driver level
     def driver_nodes(self, t: float) -> list[DriverNode]:
@@ -145,6 +174,8 @@ class RaceGraphBuilder:
                 lap_number=tim.lap_number,
                 lap_fraction=smp.track_s_m / L,
                 on_track=smp.on_track,
+                pos_age_s=smp.pos_age_s,
+                car_age_s=smp.car_age_s,
                 gap_to_leader_s=0.0 if code == leader else self.telemetry.gap_seconds(code, leader, t),
                 gap_ahead_s=self.telemetry.gap_seconds(code, ahead, t) if ahead else _NAN,
                 gap_behind_s=self.telemetry.gap_seconds(behind, code, t) if behind else _NAN,
@@ -216,19 +247,90 @@ class RaceGraphBuilder:
         }
 
     # ------------------------------------------------------------------ graph
+    def node_flag_arrays(self, rc: RaceControlState) -> tuple[np.ndarray, np.ndarray]:
+        """``(yellow, double_yellow)`` boolean arrays per track node: nodes in a flagged marshal sector."""
+        ms = self.track.marshal_sector
+        yellow = np.isin(ms, [s for s, f in rc.sector_flags.items() if f == "YELLOW"])
+        double = np.isin(ms, [s for s, f in rc.sector_flags.items() if f == "DOUBLE YELLOW"])
+        return yellow, double
+
+    def _proximity_edges(self, drivers: list[DriverNode], t: float) -> list[tuple[int, int, dict[str, Any]]]:
+        """Directed proximity edges ``(src index, dst index, attributes)`` into ``drivers``, pair by pair
+        (a -> b then b -> a), which is the insertion order the graph uses."""
+        tr, L = self.track, self.track.length_m
+        edges: list[tuple[int, int, dict[str, Any]]] = []
+        for i, a in enumerate(drivers):
+            for j in range(i + 1, len(drivers)):
+                b = drivers[j]
+                circ = float(tr.circular_delta(a.track_s_m, b.track_s_m))  # + : b ahead of a on the track
+                d_prog = b.progress_m - a.progress_m  # + : b ahead of a in the race
+                if d_prog >= 0:
+                    gap = self.telemetry.gap_seconds(a.driver_code, b.driver_code, t)
+                else:
+                    gap = -self.telemetry.gap_seconds(b.driver_code, a.driver_code, t)
+                near_time = np.isfinite(gap) and abs(gap) <= self.proximity_window_s
+                near_space = abs(circ) <= self.proximity_window_m
+                if not (near_time or near_space):
+                    continue
+                lap_diff = int(round((d_prog - circ) / L))
+                neighbours = abs(a.position - b.position) == 1
+                for (si, src), (di, dst), sign in (((i, a), (j, b), 1.0), ((j, b), (i, a), -1.0)):
+                    follower_in_window = (
+                        bool(0 < sign * gap <= DRS_WINDOW_S and lap_diff == 0) if np.isfinite(gap) else False
+                    )
+                    edges.append(
+                        (
+                            si,
+                            di,
+                            {
+                                "gap_s": float(sign * gap) if np.isfinite(gap) else _NAN,
+                                "progress_gap_m": float(sign * d_prog),
+                                "circular_gap_m": float(sign * circ),
+                                "lap_diff": int(sign * lap_diff),
+                                "rel_speed_kmh": float(dst.speed_kmh - src.speed_kmh),
+                                "order_neighbor": bool(neighbours),
+                                "drs_window": follower_in_window,
+                            },
+                        )
+                    )
+        return edges
+
+    def snapshot(self, t: float) -> Snapshot:
+        """Everything about the race at time ``t`` as plain data (no graph): drivers, race control, global features
+        and proximity edges. This is the cheap path used for dense sampling; :meth:`build` wraps it in a graph."""
+        rc = self.timeline.state_at(t)
+        drivers = self.driver_nodes(t)
+        edges = self._proximity_edges(drivers, t)
+
+        # old-style convenience list: time_gap > 0 -> other car is behind (targets in ascending order)
+        outgoing: dict[int, list[tuple[int, dict[str, Any]]]] = {}
+        for si, di, attrs in edges:
+            outgoing.setdefault(si, []).append((di, attrs))
+        for i, d in enumerate(drivers):
+            near = [
+                {
+                    "driver_code": drivers[di].driver_code,
+                    "time_gap": round(-e["gap_s"], 3),
+                    "status": "behind" if e["gap_s"] < 0 else "ahead",
+                }
+                for di, e in sorted(outgoing.get(i, []), key=lambda x: x[0])
+                if np.isfinite(e["gap_s"]) and abs(e["gap_s"]) <= self.proximity_window_s
+            ]
+            d.nearby_drivers = sorted(near, key=lambda x: abs(x["time_gap"]))
+        return Snapshot(t, rc, drivers, self.global_features(t, drivers, rc), edges)
+
     def build(self, t: float) -> nx.DiGraph:
         """Graph of the whole race at session time ``t`` (seconds)."""
         tr = self.track
-        rc = self.timeline.state_at(t)
-        drivers = self.driver_nodes(t)
+        snap = self.snapshot(t)
+        rc, drivers = snap.race_control, snap.drivers
         G = nx.DiGraph(
             time_s=t, track=tr, driver_codes=[d.driver_code for d in drivers], event=self._event_name(), race_control=rc
         )
-        G.graph["global"] = self.global_features(t, drivers, rc)
+        G.graph["global"] = snap.global_features
 
         # ---- track nodes with static layout + dynamic flags
-        yellow = np.isin(tr.marshal_sector, [s for s, f in rc.sector_flags.items() if f == "YELLOW"])
-        double = np.isin(tr.marshal_sector, [s for s, f in rc.sector_flags.items() if f == "DOUBLE YELLOW"])
+        yellow, double = self.node_flag_arrays(rc)
         occupancy = np.bincount([d.track_node for d in drivers if d.track_node >= 0], minlength=tr.n)
         for k in range(tr.n):
             red, sc, vsc, vsc_end = rc.is_red, rc.is_safety_car, rc.is_vsc, rc.is_vsc_ending
@@ -288,55 +390,8 @@ class RaceGraphBuilder:
                 G.add_edge(tid, d.driver_code, edge_type="occupied_by", offset_m=offset, lateral_m=d.lateral_offset_m)
 
         # ---- driver <-> driver proximity
-        L = tr.length_m
-        for i, a in enumerate(drivers):
-            for b in drivers[i + 1 :]:
-                circ = float(tr.circular_delta(a.track_s_m, b.track_s_m))  # + : b ahead of a on the track
-                d_prog = b.progress_m - a.progress_m  # + : b ahead of a in the race
-                if d_prog >= 0:
-                    gap = self.telemetry.gap_seconds(a.driver_code, b.driver_code, t)
-                else:
-                    gap = -self.telemetry.gap_seconds(b.driver_code, a.driver_code, t)
-                near_time = np.isfinite(gap) and abs(gap) <= self.proximity_window_s
-                near_space = abs(circ) <= self.proximity_window_m
-                if not (near_time or near_space):
-                    continue
-                lap_diff = int(round((d_prog - circ) / L))
-                neighbours = abs(a.position - b.position) == 1
-                for src, dst, sign in ((a, b, 1.0), (b, a, -1.0)):
-                    follower_in_window = (
-                        bool(0 < sign * gap <= DRS_WINDOW_S and lap_diff == 0) if np.isfinite(gap) else False
-                    )
-                    G.add_edge(
-                        src.driver_code,
-                        dst.driver_code,
-                        edge_type="proximity",
-                        gap_s=float(sign * gap) if np.isfinite(gap) else _NAN,
-                        progress_gap_m=float(sign * d_prog),
-                        circular_gap_m=float(sign * circ),
-                        lap_diff=int(sign * lap_diff),
-                        rel_speed_kmh=float(dst.speed_kmh - src.speed_kmh),
-                        order_neighbor=bool(neighbours),
-                        drs_window=follower_in_window,
-                    )
-
-        # old-style convenience list: time_gap > 0 -> other car is behind
-        for d in drivers:
-            near = []
-            for _, nb, e in G.out_edges(d.driver_code, data=True):
-                if (
-                    e["edge_type"] == "proximity"
-                    and np.isfinite(e["gap_s"])
-                    and abs(e["gap_s"]) <= self.proximity_window_s
-                ):
-                    near.append(
-                        {
-                            "driver_code": nb,
-                            "time_gap": round(-e["gap_s"], 3),
-                            "status": "behind" if e["gap_s"] < 0 else "ahead",
-                        }
-                    )
-            d.nearby_drivers = sorted(near, key=lambda x: abs(x["time_gap"]))
+        for si, di, attrs in snap.edges:
+            G.add_edge(drivers[si].driver_code, drivers[di].driver_code, edge_type="proximity", **attrs)
         G.graph["driver_nodes"] = drivers
         return G
 

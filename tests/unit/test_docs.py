@@ -76,8 +76,43 @@ def test_structure_block_lists_only_existing_files():
 
 
 def test_readme_images_exist():
-    for rel in re.findall(r'src="([^"]+\.png)"', README):
+    for rel in re.findall(r'src="([^"]+\.(?:png|gif))"', README):
         assert (ROOT / rel).is_file(), rel
+
+
+def test_readme_is_up_to_date_with_the_template_and_the_code():
+    """README.md is generated (docs/readme_template.md + the code); edit the template, then run
+    `python scripts/generate_readme.py`."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("generate_readme", ROOT / "scripts" / "generate_readme.py")
+    gen = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gen)
+    assert gen.render() == README, "README.md is stale: run `python scripts/generate_readme.py`"
+    assert gen.main(["--check"]) == 0
+
+
+def test_the_generated_storage_table_matches_the_real_array_layout(sequence):
+    """The sizes in the README are computed from the schema; make sure the formula describes the real arrays."""
+    T, D, N = 5400, 20, 695
+    per_frame = {
+        "track_flags": N,
+        "driver_x": D * sequence.driver_x.shape[2] * 4,
+        "driver_mask": D * sequence.driver_x.shape[2],
+        "edge_attr": D * D * sequence.edge_attr.shape[3] * 4,
+        "edge_attr_mask": D * D * sequence.edge_attr.shape[3],
+        "edge_exists": D * D,
+    }
+    real = {
+        "track_flags": sequence.track_flags[0].itemsize * N,
+        "driver_x": sequence.driver_x.itemsize * D * sequence.driver_x.shape[2],
+        "driver_mask": sequence.driver_mask.itemsize * D * sequence.driver_x.shape[2],
+        "edge_attr": sequence.edge_attr.itemsize * D * D * sequence.edge_attr.shape[3],
+        "edge_attr_mask": sequence.edge_attr_mask.itemsize * D * D * sequence.edge_attr.shape[3],
+        "edge_exists": sequence.edge_exists.itemsize * D * D,
+    }
+    assert per_frame == real
+    assert T == 5400  # the README states a 90 minute race at one frame per second
 
 
 def test_readme_mentions_every_public_name():
