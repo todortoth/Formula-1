@@ -18,7 +18,7 @@ jobs:
       F1_CACHE_DIR: ${{ github.workspace }}/.fastf1_cache
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
