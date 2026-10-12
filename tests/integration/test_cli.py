@@ -93,8 +93,8 @@ class TestContinuousMode:
 
     def test_npz_format_writes_the_single_file_only(self, analyser, tmp_path):
         res = cli.run_continuous(analyser, "x", 3, out_dir=str(tmp_path), gif=False, dataset_format="npz")
-        assert res.parquet_dir is None and Path(res.sequence_file).name == "sequence_lap3.npz"
-        assert [p.name for p in tmp_path.iterdir()] == ["sequence_lap3.npz"]
+        assert res.parquet_dir is None and Path(res.sequence_file).name == "sequence_lap3-6.npz"
+        assert [p.name for p in tmp_path.iterdir()] == ["sequence_lap3-6.npz"]
         from f1strategy import RaceSequence
 
         assert RaceSequence.load(res.sequence_file).n_frames == res.n_frames
@@ -109,7 +109,7 @@ class TestContinuousMode:
         assert np.array_equal(a.driver_x, b.driver_x, equal_nan=True) and np.array_equal(a.track_flags, b.track_flags)
 
     def test_hz_sets_the_data_rate_independently_of_the_gif_rate(self, analyser, tmp_path, capsys):
-        res = cli.run_continuous(analyser, "x", 3, hz=10, out_dir=str(tmp_path), fps=5, chunk_frames=200, gif_every=10)
+        res = cli.run_continuous(analyser, "x", 3, 3, hz=10, out_dir=str(tmp_path), fps=5, chunk_frames=200, gif_every=10)
         from PIL import Image
 
         from f1strategy import ParquetSequence
@@ -127,8 +127,8 @@ class TestContinuousMode:
 
     def test_a_single_lap_is_named_after_that_lap(self, analyser, tmp_path):
         res = cli.run_continuous(analyser, "x", 3, out_dir=str(tmp_path), gif=False)
-        assert Path(res.parquet_dir).name == "sequence_lap3" and res.gif_file is None
-        assert [p.name for p in tmp_path.iterdir()] == ["sequence_lap3"]
+        assert Path(res.parquet_dir).name == "sequence_lap3-6" and res.gif_file is None
+        assert [p.name for p in tmp_path.iterdir()] == ["sequence_lap3-6"]
 
     def test_rerunning_replaces_the_previous_dataset(self, analyser, tmp_path):
         cli.run_continuous(analyser, "x", 3, out_dir=str(tmp_path), gif=False, chunk_frames=20)
@@ -164,12 +164,12 @@ class TestContinuousMode:
         monkeypatch.setattr(cli, "SessionAnalyser", lambda **kw: analyser)
         cli.main(["--lap", "3", "--out-dir", str(tmp_path), "--continuous", "--no-tables", "--no-gif"])
         names = sorted(p.name for p in tmp_path.iterdir())
-        assert "sequence_lap3" in names and "graph_sector2.png" in names and "graph_lap3_sector2.npz" in names
+        assert "sequence_lap3-6" in names and "graph_sector2.png" in names and "graph_lap3_sector2.npz" in names
 
     def test_no_snapshots_runs_only_the_continuous_part(self, monkeypatch, analyser, tmp_path):
         monkeypatch.setattr(cli, "SessionAnalyser", lambda **kw: analyser)
         cli.main(["--lap", "3", "--out-dir", str(tmp_path), "--continuous", "--no-snapshots", "--no-gif"])
-        assert [p.name for p in tmp_path.iterdir()] == ["sequence_lap3"]
+        assert [p.name for p in tmp_path.iterdir()] == ["sequence_lap3-6"]
 
     def test_lap_range_and_rate_options_are_forwarded(self, monkeypatch, analyser, tmp_path):
         monkeypatch.setattr(cli, "SessionAnalyser", lambda **kw: analyser)
