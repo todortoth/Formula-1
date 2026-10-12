@@ -206,6 +206,14 @@ def run_continuous(
 
     With a Parquet dataset the race is streamed to disk in chunks (bounded memory), continuity is checked in Polars and
     the GIF is drawn from a decimated read of the dataset; the in-memory path is only used for ``--format npz``."""
+    # Auto detect max laps
+    try:
+        max_session_laps = int(analyzer.session.laps['LapNumber'].max())
+        if to_lap is None or to_lap > max_session_laps:
+            to_lap = max_session_laps
+    except Exception:
+        pass
+
     to_lap = from_lap if to_lap is None else to_lap
     step = resolve_step(step_s, hz)
     os.makedirs(out_dir, exist_ok=True)

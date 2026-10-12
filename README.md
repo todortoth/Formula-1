@@ -31,7 +31,7 @@ find optimal strategic decisions; this repository is the data foundation for tha
 - [Testing and continuous integration](#testing-and-continuous-integration)
 - [Project structure](#project-structure)
 - [Migrating from the flat layout](#migrating-from-the-flat-layout)
-- [Roadmap](#roadmap)
+- [Bulk export](#bulk export)
 - [Acknowledgements and disclaimer](#acknowledgements-and-disclaimer)
 
 ## Features
@@ -814,15 +814,15 @@ Behaviour changes since the first graph version: pit stops are now a pure count 
 `drs_enabled` is `False` (not unknown) until a message enables DRS whenever a race-control feed exists; the normalised
 `progress_m` is scaled by the race distance; pooling keeps the mask in the pooled shape.
 
-## Roadmap
+## Bulk export
 
-- Per-driver blue flags and penalties from the race-control text.
-- Training targets (e.g. "pit within the next N laps", position changes) and a PyTorch `Dataset` on top of the arrays.
-- An attention mask encoding the ring and driver-to-track structure.
-- Parallel chunk building across processes for very long, fast-sampled stretches.
-- Event-driven sampling (denser frames around pit stops, overtakes and flag changes).
-- Qualifying and sprint specifics; datasets spanning several races.
-- More live-test circuits.
+```bash
+scripts/scape_data.ps1
+scripts/scrape_data.sh
+```
+
+For exporting all 186 races from 2018 onward use the scrape data powershell/bash script. It iterates through the races
+while exporting the data into the `parquet_datasets` folder.
 
 ## Acknowledgements and disclaimer
 

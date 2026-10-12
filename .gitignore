@@ -22,3 +22,6 @@ dist
 .coverage
 coverage.xml
 htmlcov
+
+#HUN-REN
+uv.lock
