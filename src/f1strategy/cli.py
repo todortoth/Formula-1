@@ -208,7 +208,7 @@ def run_continuous(
     the GIF is drawn from a decimated read of the dataset; the in-memory path is only used for ``--format npz``."""
     # Auto detect max laps
     try:
-        max_session_laps = int(analyzer.session.laps['LapNumber'].max())
+        max_session_laps = int(analyzer.session.laps["LapNumber"].max())
         if to_lap is None or to_lap > max_session_laps:
             to_lap = max_session_laps
     except Exception:
