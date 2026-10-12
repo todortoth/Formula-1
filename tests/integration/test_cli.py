@@ -109,7 +109,9 @@ class TestContinuousMode:
         assert np.array_equal(a.driver_x, b.driver_x, equal_nan=True) and np.array_equal(a.track_flags, b.track_flags)
 
     def test_hz_sets_the_data_rate_independently_of_the_gif_rate(self, analyser, tmp_path, capsys):
-        res = cli.run_continuous(analyser, "x", 3, 3, hz=10, out_dir=str(tmp_path), fps=5, chunk_frames=200, gif_every=10)
+        res = cli.run_continuous(
+            analyser, "x", 3, 3, hz=10, out_dir=str(tmp_path), fps=5, chunk_frames=200, gif_every=10
+        )
         from PIL import Image
 
         from f1strategy import ParquetSequence
