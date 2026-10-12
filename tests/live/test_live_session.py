@@ -43,8 +43,11 @@ def test_all_twenty_drivers_are_present_with_telemetry(spa):
     assert len(G.graph["driver_codes"]) == 20
     for code in G.graph["driver_codes"]:
         d = G.nodes[code]
-        assert 0 <= d["speed_kmh"] < 380 and abs(d["lateral_offset_m"]) < 30 and d["compound"] in (
-            "SOFT", "MEDIUM", "HARD", "INTERMEDIATE", "WET", "UNKNOWN", "NONE")  # None added to accommodate missing values
+        assert (
+            0 <= d["speed_kmh"] < 380
+            and abs(d["lateral_offset_m"]) < 30
+            and d["compound"] in ("SOFT", "MEDIUM", "HARD", "INTERMEDIATE", "WET", "UNKNOWN", "NONE")
+        )  # None added to accommodate missing values
 
 
 def test_the_leader_is_on_the_sector_boundary_at_the_snapshot(spa):
@@ -126,7 +129,7 @@ def test_parquet_dataset_of_a_real_lap_at_10_hz(spa, tmp_path):
     assert ds.step_s == pytest.approx(0.1) and ds.n_frames > 600 and len(ds.manifest["chunks"]) >= 2
     report = ds.continuity_report()
     assert report.max_position_step_ratio < 5.0, report.summary()
-    assert(len(report.position_jumps)) < 30.0, report.summary()
+    assert (len(report.position_jumps)) < 30.0, report.summary()
     assert report.progress_regressions == []
     assert (
         ds.scan_drivers().select(pl.col("pos_age_s").max()).collect().item() < 1.5
