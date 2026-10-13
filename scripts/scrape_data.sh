@@ -1,61 +1,59 @@
 #!/usr/bin/env bash
 
 # ==============================================================================
-# F1 Parquet Dataset Bulk Scraper (Full Races: 2019 - 2025) - Linux/Bash
+# F1 Parquet Dataset Scraper (Single Year Worker)
 # ==============================================================================
 
+if [ -z "$1" ]; then
+    echo "Error: No year specified. Usage: $0 <year>"
+    exit 1
+fi
+
+TARGET_YEAR=$1
 BASE_OUT_DIR="parquet_datasets"
 mkdir -p "$BASE_OUT_DIR"
 
-START_YEAR=2019
-END_YEAR=2025
+echo -e "\033[36mStarting full-race F1 Parquet extraction for season $TARGET_YEAR...\033[0m"
 
-echo -e "\033[36mStarting full-race F1 Parquet extraction for seasons $START_YEAR to $END_YEAR...\033[0m"
+for ((round=1; round<=25; round++)); do
 
-for ((year=START_YEAR; year<=END_YEAR; year++)); do
-    echo -e "\n--------------------------------------------------"
-    echo -e "\033[33mProcessing Season: $year\033[0m"
-    echo -e "--------------------------------------------------"
+    DATASET_PATH="$BASE_OUT_DIR/${TARGET_YEAR}_round_${round}.ds"
 
-    for ((round=1; round<=25; round++)); do
+    if [ -d "$DATASET_PATH" ]; then
+        echo -e "[Round $round] Dataset already exists at $DATASET_PATH. Skipping."
+        continue
+    fi
 
-        DATASET_PATH="$BASE_OUT_DIR/${year}_round_${round}.ds"
+    echo -e "[Round $round] Extracting FULL RACE dataset for $TARGET_YEAR (Round $round)..."
+
+    python main.py \
+        --year "$TARGET_YEAR" \
+        --event "$round" \
+        --session "R" \
+        --continuous \
+        --from-lap 1 \
+        --to-lap 99 \
+        --hz 10 \
+        --format parquet \
+        --out-dir "$DATASET_PATH" \
+        --no-gif \
+        --no-snapshots \
+        --no-tables \
+        --no-plots \
+        --no-export
+
+    EXIT_CODE=$?
+
+    if [ $EXIT_CODE -ne 0 ]; then
+        echo "[WARNING] Round $round failed with exit code $EXIT_CODE."
 
         if [ -d "$DATASET_PATH" ]; then
-            echo -e "\033[90m[Round $round] Dataset already exists at $DATASET_PATH. Skipping.\033[0m"
-            continue
+            rm -rf "$DATASET_PATH"
         fi
 
-        echo -e "\033[32m[Round $round] Extracting FULL RACE dataset for $year (Round $round)...\033[0m"
-
-        python main.py \
-            --year "$year" \
-            --event "$round" \
-            --session "R" \
-            --continuous \
-            --from-lap 1 \
-            --to-lap 99 \
-            --hz 10 \
-            --format parquet \
-            --out-dir "$DATASET_PATH" \
-            --no-gif \
-            --no-snapshots \
-            --no-tables \
-            --no-plots \
-            --no-export
-
-        EXIT_CODE=$?
-
-       if [ $EXIT_CODE -ne 0 ]; then
-            echo -e "\033[33m[Round $round] Finished or round $round does not exist for $year. Moving to next year.\033[0m"
-
-            if [ -d "$DATASET_PATH" ]; then
-                rm -rf "$DATASET_PATH"
-            fi
-
-            break
-        fi
-    done
+        echo "[Round $round] Skipping to next round due to data error."
+        continue
+    fi
 done
 
-echo -e "\n\033[36mBulk scraping complete! All available full-race parquet datasets are stored under '$BASE_OUT_DIR/'.\033[0m"
+echo -e "\n\033[32mScraping complete for season $TARGET_YEAR!\033[0m"
