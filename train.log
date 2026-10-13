@@ -1,0 +1,8 @@
+nohup: ignoring input
+150 races | train frames 1565657 (flagged x5) | val frames 512 of 168723
+validation: ['2019_round_03', '2019_round_06', '2019_round_10', '2020_round_04', '2020_round_16', '2021_round_05', '2022_round_11', '2022_round_17', '2023_round_08', '2023_round_11', '2023_round_15', '2024_round_14', '2024_round_16', '2025_round_09', '2025_round_20']
+model small: 5.04 M parameters on cuda
+step      50 | loss=2.038 A=0.304 B=0.379 C=0.792 D=0.564 | gnorm 3.36 | lr 1.25e-05 | 1.33s/step
+step     100 | loss=1.605 A=0.225 B=0.309 C=0.612 D=0.458 | gnorm 2.26 | lr 2.50e-05 | 1.27s/step
+step     150 | loss=1.396 A=0.189 B=0.261 C=0.551 D=0.395 | gnorm 2.22 | lr 3.75e-05 | 1.25s/step
+step     200 | loss=1.269 A=0.167 B=0.225 C=0.513 D=0.365 | gnorm 2.01 | lr 5.00e-05 | 1.24s/step

@@ -32,6 +32,7 @@ find optimal strategic decisions; this repository is the data foundation for tha
 - [Project structure](#project-structure)
 - [Migrating from the flat layout](#migrating-from-the-flat-layout)
 - [Bulk export](#bulk export)
+- [Pre training](#self-supervised-pre-training-bert-over-race-snapshots)
 - [Acknowledgements and disclaimer](#acknowledgements-and-disclaimer)
 
 ## Features
@@ -279,10 +280,10 @@ use them to learn how much to trust a value. Sampling faster than ~10 Hz only ad
 ### What is stored
 
 A `RaceSequence` is a set of arrays. Stacking full per-frame arrays would be wasteful (at one frame per second the
-track tokens alone would be {{NAIVE_TRACK_MB}} MB for a 90 minute race, and nearly all of it never changes), so:
+track tokens alone would be 469 MB for a 90 minute race, and nearly all of it never changes), so:
 
-- **static track features** are stored once; everything except {{TRACK_DYNAMIC}} is static;
-- the six flags {{FLAG_BITS}} are **bit-packed** into one `uint8` per node and frame; `n_drivers` is derived;
+- **static track features** are stored once; everything except `flag_yellow`, `flag_double_yellow`, `flag_sc`, `flag_vsc`, `flag_vsc_ending`, `flag_red`, `n_drivers` is static;
+- the six flags `flag_yellow`, `flag_double_yellow`, `flag_sc`, `flag_vsc`, `flag_vsc_ending`, `flag_red` are **bit-packed** into one `uint8` per node and frame; `n_drivers` is derived;
 - **drivers sit in fixed slots** (alphabetical by code), so a car keeps its row across time; the live race position is
   the `position` feature;
 - **proximity edges are dense** `[T, D, D]` matrices (`edge_exists` + `edge_attr`), the natural shape for an attention bias;
@@ -290,19 +291,26 @@ track tokens alone would be {{NAIVE_TRACK_MB}} MB for a 90 minute race, and near
 
 Estimated in-memory size for a full race (the compressed `.npz` is smaller):
 
-{{SIZES}}
+| Array | Shape / dtype | Size |
+|---|---|---|
+| `track_flags` | `[T, N]` uint8 | 3.8 MB |
+| `driver_x` + `driver_mask` | `[T, D, 45]` float32 + bool | 24.3 MB |
+| `edge_attr` + `edge_attr_mask` + `edge_exists` | `[T, D, D, 7]` float32 + bool, `[T, D, D]` bool | 77.8 MB |
+| `global_x` + `global_mask` | `[T, 23]` | 0.6 MB |
+| `driver_to_track`, `driver_present`, `times` | `[T, D]`, `[T]` | 0.6 MB |
+| **Total** | T = 5400, D = 20, N = 695 | **107 MB** |
 
 ### Parquet datasets (Polars)
 
-At 10 Hz a race is ~54 000 frames; as dense arrays that is about {{DENSE_10HZ_MB}} for 20 cars, more than a pipeline
+At 10 Hz a race is ~54 000 frames; as dense arrays that is about 1.1 GB for 20 cars, more than a pipeline
 should hold at once. `write_sequence_parquet` therefore **streams** the race into a dataset directory chunk by chunk, so
 memory stays bounded however long the race is: peak memory is about proportional to `chunk_frames` (measured on the
-synthetic race at roughly 0.1 MB per frame for a 20 car grid, i.e. ~200 MB at the default of {{CHUNK_FRAMES}} frames), while
+synthetic race at roughly 0.1 MB per frame for a 20 car grid, i.e. ~200 MB at the default of 2000 frames), while
 throughput is about 7-8 ms per frame either way. The format is Parquet written and read with
 [Polars](https://pola.rs):
 
 ```python
-ds = analyser.write_sequence_parquet_for_laps("spa.ds", 1, 44, hz=10, chunk_frames={{CHUNK_FRAMES}}, overwrite=True)
+ds = analyser.write_sequence_parquet_for_laps("spa.ds", 1, 44, hz=10, chunk_frames=2000, overwrite=True)
 ds = analyser.write_sequence_parquet("spa.ds", start_s=3600, end_s=3720, hz=10)    # or by session time
 print(ds)      # ParquetSequence(... frames, ... chunks, ... MB on disk)
 ```
@@ -311,7 +319,7 @@ print(ds)      # ParquetSequence(... frames, ... chunks, ... MB on disk)
 |---|---|---|
 | `manifest.json` | - | schema, driver slots, chunk index; **written last**, a dataset without it refuses to open |
 | `track.parquet` | track node | the static track features |
-| `drivers/part-*.parquet` | frame and driver present | `frame`, `t`, `driver`, `slot`, `track_node` and all {{N_DRIVER_FEATURES}} driver features (about {{DRIVER_ROWS_10HZ}} rows for a 90 minute race at 10 Hz) |
+| `drivers/part-*.parquet` | frame and driver present | `frame`, `t`, `driver`, `slot`, `track_node` and all 45 driver features (about 1,080,000 rows for a 90 minute race at 10 Hz) |
 | `global/part-*.parquet` | frame | `frame`, `t`, the global features, and the flagged marshal sectors as lists (`yellow_sectors`, `double_yellow_sectors`) |
 | `edges/part-*.parquet` | proximity edge | `frame`, `t`, `src`, `dst` (+ slots), the edge features |
 
@@ -332,7 +340,7 @@ smooth = drivers.sort("slot", "frame").with_columns(pl.col("speed_kmh").rolling_
 
 seq = ds.read_sequence(start_frame=0, stop_frame=3000, every=1)       # a dense RaceSequence for a range ...
 lo, hi = ds.frame_range(start_s=3600, end_s=3720)                     # ... found by session time
-for chunk in ds.iter_chunks({{CHUNK_FRAMES}}):                                    # bounded-memory pass over the whole race
+for chunk in ds.iter_chunks(2000):                                    # bounded-memory pass over the whole race
     ...
 print(ds.continuity_report().summary())                               # the continuity check, evaluated by Polars
 ```
@@ -438,25 +446,129 @@ on the graph, except the derived ones (one-hots, sin/cos). They are checked agai
 ### Track node features
 
 <!-- BEGIN:track-features -->
-{{TRACK}}
+| Feature | Meaning |
+|---|---|
+| `s_m` | Distance from the start/finish line along the lap, in metres. |
+| `x_m` | World x of the node (frame of the FastF1 position feed), metres. |
+| `y_m` | World y of the node, metres. |
+| `z_m` | Elevation of the node, metres. |
+| `heading_sin` | Direction of the track tangent, `sin(atan2(dy, dx))`. |
+| `heading_cos` | Direction of the track tangent, `cos(atan2(dy, dx))`. |
+| `curvature` | Signed curvature in 1/m, positive = left turn (from a ~12 m smoothed centre line). |
+| `gradient` | Slope `dz/ds` (metre per metre). |
+| `sector_1` | One-hot official timing sector 1 (boundaries come from the reference lap's sector times). |
+| `sector_2` | One-hot official timing sector 2. |
+| `sector_3` | One-hot official timing sector 3. |
+| `is_corner` | 1 on the node closest to a numbered corner marker. |
+| `corner_number` | Corner number of that marker (0 = none). |
+| `marshal_sector` | Marshal sector the node lies in (-1 = unknown) - the unit in which sector yellow flags are issued. |
+| `in_drs_zone` | Node is inside an inferred DRS activation zone. |
+| `is_drs_start` | First node of a DRS zone (the activation line). |
+| `is_drs_end` | Last node of a DRS zone. |
+| `is_drs_detection` | Nearest node to a DRS detection point (only when you supply them, see Limitations). |
+| `flag_yellow` | Yellow flag in this node's marshal sector. |
+| `flag_double_yellow` | Double yellow in this node's marshal sector. |
+| `flag_sc` | Safety car deployed (applies to every node). |
+| `flag_vsc` | Virtual safety car deployed (every node). |
+| `flag_vsc_ending` | VSC ending (every node). |
+| `flag_red` | Red flag (every node). |
+| `n_drivers` | Number of cars whose nearest track node is this one. |
 <!-- END:track-features -->
 
 ### Driver node features
 
 <!-- BEGIN:driver-features -->
-{{DRIVER}}
+| Feature | Meaning |
+|---|---|
+| `x_m` | Car position at the snapshot time (interpolated), metres. |
+| `y_m` | Car position y, metres. |
+| `z_m` | Car elevation, metres. |
+| `speed_kmh` | Speed from the car data channel, interpolated. |
+| `vx_mps` | Velocity x from the position feed (central difference over +-0.3 s), m/s. |
+| `vy_mps` | Velocity y, m/s. |
+| `heading_sin` | Direction of travel `sin(atan2(vy, vx))`; below 2 m/s the track tangent is used instead. |
+| `heading_cos` | Direction of travel, cosine. |
+| `heading_rel_track_sin` | Heading relative to the track tangent, sine (about 0 when aligned; large when spinning or in the pit lane). |
+| `heading_rel_track_cos` | Heading relative to the track tangent, cosine. |
+| `throttle` | Throttle in percent. |
+| `brake` | Brake on (0/1). |
+| `gear` | Gear. |
+| `rpm` | Engine revs. |
+| `drs_open` | DRS flap open (raw DRS channel 10, 12 or 14). |
+| `drs_eligible` | Raw DRS channel equals 8 ("detected / eligible"; semantics are not officially documented). |
+| `track_s_m` | Distance from the start/finish line of the car's projection onto the centre line, metres. |
+| `lap_fraction` | `track_s_m` divided by the track length (jumps from 1 to 0 at the start/finish line). |
+| `lap_fraction_sin` | `sin(2 pi lap_fraction)`: the wrap-safe encoding of the lap position, continuous across the line. |
+| `lap_fraction_cos` | `cos(2 pi lap_fraction)`. |
+| `lateral_offset_m` | Signed distance from the reference line, metres (+ = left). |
+| `progress_m` | Cumulative race distance (laps x length + position); 0 at the line at lights-out, grid slots are slightly negative. |
+| `lap_number` | Lap the car is on, from the timing table. |
+| `position` | Live race position, ranked by `progress_m`. |
+| `official_position` | Classified position at the end of the car's last completed lap (NaN before the first). |
+| `gap_to_leader_s` | True time gap to the leader: how long ago was the leader where this car is now. |
+| `gap_ahead_s` | Same, to the car directly ahead (NaN for the leader). |
+| `gap_behind_s` | Same, of the car directly behind to this car (NaN for the last car). |
+| `tyre_age` | Laps on the current set (FastF1 `TyreLife`). |
+| `fresh_tyre` | Current set was new when fitted. |
+| `stint` | Stint number. |
+| `pit_stops` | Pit lane entries so far (a pure count of entries up to the snapshot time). |
+| `in_pit` | Car is in the pit lane right now (between pit entry and the next lap's pit exit). |
+| `on_track` | Position feed status is not `OffTrack`. |
+| `pos_age_s` | Seconds since the newest *real* position sample behind this row (0 exactly at a sample, up to ~0.22 s; NaN before the first sample, grows if the stream stops). |
+| `car_age_s` | Same for the car-data stream (speed, throttle, ...; ~0.24 s interval). |
+| `pace_last3_s` | Mean of the last three completed representative laps (no in/out laps, none with SC/VSC/red), seconds. |
+| `last_lap_time_s` | Time of the last completed lap, seconds. |
+| `finished_or_retired` | More than 5 s have passed since the car's final lap timestamp. |
+| `compound_soft` | One-hot: current tyre compound is SOFT. |
+| `compound_medium` | One-hot: current tyre compound is MEDIUM. |
+| `compound_hard` | One-hot: current tyre compound is HARD. |
+| `compound_intermediate` | One-hot: current tyre compound is INTERMEDIATE. |
+| `compound_wet` | One-hot: current tyre compound is WET. |
+| `compound_unknown` | One-hot: compound unknown / not in the list above. |
 <!-- END:driver-features -->
 
 ### Global features
 
 <!-- BEGIN:global-features -->
-{{GLOBAL}}
+| Feature | Meaning |
+|---|---|
+| `time_s` | Snapshot time in session seconds. |
+| `leader_lap` | Lap of the race leader. |
+| `laps_remaining` | Scheduled laps minus leader lap (NaN if unknown). |
+| `race_fraction` | Leader lap divided by scheduled laps. |
+| `is_green` | No flag anywhere: track status clear and no sector flags. |
+| `is_yellow` | Yellow somewhere: track status yellow or any sector flagged. |
+| `is_sc` | Safety car deployed. |
+| `is_vsc` | Virtual safety car deployed. |
+| `is_vsc_ending` | VSC ending. |
+| `is_red` | Red flag. |
+| `sc_in_this_lap` | Race control announced "SAFETY CAR IN THIS LAP" (reset at all-clear). |
+| `yellow_unlocalised` | Track status says yellow but no marshal sector is known (messages missing). |
+| `n_yellow_sectors` | Number of marshal sectors currently under yellow / double yellow. |
+| `drs_enabled` | Race control has enabled DRS. Disabled until the first enabling message; unknown (masked) if there is no message feed at all. |
+| `air_temp` | Air temperature, deg C. |
+| `track_temp` | Track temperature, deg C. |
+| `humidity` | Relative humidity, percent. |
+| `pressure` | Air pressure, mbar. |
+| `rainfall` | Rain (0/1). |
+| `wind_speed` | Wind speed, m/s. |
+| `wind_direction_sin` | Wind direction, sine. |
+| `wind_direction_cos` | Wind direction, cosine. |
+| `n_drivers` | Number of cars in the snapshot. |
 <!-- END:global-features -->
 
 ### Proximity edge features
 
 <!-- BEGIN:edge-features -->
-{{EDGE}}
+| Feature | Meaning |
+|---|---|
+| `gap_s` | Time gap seen from the source car; **positive = the target is ahead**. NaN when undefined (e.g. a lap apart, never reached that point). |
+| `progress_gap_m` | Difference in cumulative race distance, target minus source, metres. |
+| `circular_gap_m` | Shortest signed distance along the track ignoring laps, in (-L/2, L/2]; this is what connects lapped traffic. |
+| `lap_diff` | Whole laps the target is ahead of the source (negative = behind). |
+| `rel_speed_kmh` | Target speed minus source speed. |
+| `order_neighbor` | The two cars are consecutive in the running order. |
+| `drs_window` | Source is the follower, within 1.0 s of the target and on the same lap (approximates the DRS rule with the true gap). |
 <!-- END:edge-features -->
 
 ## Using the graph with a model
@@ -517,7 +629,33 @@ Not included yet: an attention mask encoding the ring / driver-to-track structur
 `python main.py`, `python -m f1strategy` and `f1-graph` are equivalent.
 
 <!-- BEGIN:cli-options -->
-{{CLI}}
+| Option | Default | Meaning |
+|---|---|---|
+| `--year` | 2025 | Season. |
+| `--event` | `Belgian Grand Prix` | Event name (fuzzy-matched by FastF1) or, if all digits, the round number. |
+| `--session` | `R` | Session identifier: `R`, `Q`, `S`, `SQ`, `FP1`... |
+| `--lap` | 44 | Lap whose sector crossings define the sector snapshots (taken when the **leader** crosses the sector line). |
+| `--sectors` | all three | Any of `"Sector 1"` `"Sector 2"` `"Sector 3"`. |
+| `--out-dir` | `graphs` | Where PNGs and `.npz` files go. |
+| `--spacing` | 10 | Track node spacing in metres. |
+| `--max-tokens` | 512 | Token budget used to choose the track pooling factor. |
+| `--drs-detection-offset` | none | Estimate DRS detection points as *zone start minus this many metres*. |
+| `--cache-dir` | `$F1_CACHE_DIR` or `~/fastf1_cache` | FastF1 cache directory. |
+| `--continuous` | off | **Continuous mode**: also sample the race graph densely over a lap window, save it and render a GIF. |
+| `--from-lap` | `--lap` | First lap of the continuous window (starts when the leader starts it). |
+| `--to-lap` | `--from-lap` | Last lap of the window (ends when the leader completes it). |
+| `--step` | 1.0 | Seconds between two frames (or give `--hz`). |
+| `--hz` | none | Frames per second of *data*, e.g. `10`; an alternative to `--step` (not the GIF rate: that is `--fps`). |
+| `--format` | `parquet` | Dataset format: `parquet` (a directory, streamed in chunks), `npz` (one file, in memory) or `both`. |
+| `--chunk-frames` | 2000 | Frames per Parquet part / in-memory chunk; this is what bounds the memory use. |
+| `--gif-every` | auto | Use every n-th frame in the GIF; automatic means at most 300 frames. |
+| `--fps` | 10 | Playback frames per second of the GIF. |
+| `--no-gif` | off | Continuous mode: write only the dataset, no GIF. |
+| `--no-snapshots` | off | Skip the sector snapshots (tables, plots, npz); needs `--continuous`. |
+| `--no-tables` | off | Skip the console tables (sector snapshots). |
+| `--no-plots` | off | Skip the PNG plots. |
+| `--no-export` | off | Skip the `.npz` export. |
+| `--verbose` | off | Debug logging (`-v`). |
 <!-- END:cli-options -->
 
 ## Conventions
@@ -662,7 +800,7 @@ Formula-1/
 | `SessionAnalyserClass.py` | `f1strategy/session.py` | `from f1strategy import SessionAnalyser` |
 | `main.py` | `f1strategy/cli.py` (+ thin `main.py`) | `python main.py` still works |
 
-Changes in 0.4.0 (10 Hz and Parquet): two new driver features (`pos_age_s`, `car_age_s`, so {{N_DRIVER_FEATURES}} in total),
+Changes in 0.4.0 (10 Hz and Parquet): two new driver features (`pos_age_s`, `car_age_s`, so 45 in total),
 `RaceGraphBuilder.snapshot()` (plain data; `build()` now wraps it and returns the same graph), `GraphExporter.export_snapshot()`
 and `FrameRecord`, a graph-free sampling path that is bit-for-bit equal to the graph path, `hz=` everywhere, Parquet
 export / import (`polars` is now a dependency), and `--format parquet` is the default for `--continuous`
@@ -684,8 +822,129 @@ scripts/scape_data.ps1
 scripts/scrape_data.sh
 ```
 
-For exporting all 186 races from 2018 onward use the scrape data powershell/bash script. It iterates through the races
-while exporting the data into the `parquet_datasets` folder.
+For exporting all 152 races from 2019 onward use the scrape data powershell/bash script. It iterates through the races
+while exporting the data into the `parquet_datasets` folder. See [Datasets](#datasets) for more info.
+
+# Self-supervised pre-training (BERT over race snapshots)
+
+- [Model](#model)
+- [The pretest tasks](#the-pretext-tasks)
+- [Leakage controls](#leakage-controls-what-makes-the-tasks-non-trivial)
+- [Training details](#training-details)
+- [Data notes](#data-notes-from-the-2019-australian-gp-file)
+- [Limitations](#not-done--limitations)
+
+### Datasets
+
+```bash
+chmod +x scripts/scrape.sh
+chmod +x scripts/scrape_data.sh
+scripts/scrape.sh
+```
+
+Datasets are pulled from the FastF1 API, all races between 2019 and 2025. Each race generates a dataset in `parquet_datasets`
+with all laps of the race included (except Belgium 2021, which fails with a Data Error). Log files are stored in `scraping_logs`.
+
+To monitor:
+
+```bash
+ps -ef | grep -E "scrape.sh|scrape_data.sh" | grep -v grep
+```
+
+To test the integrity of the dataset use this helper function:
+
+```bash
+python /home/todortoth/F1/F1/tests/test_dataset.py /home/todortoth/F1/F1/parquet_datasets/2019_round_1.ds/sequence_lap1-58/ --out-gif "/home/todortoth/F1/F1/graphs/test.gif"
+```
+
+It generates a gif from the pulled dataset to visualize whether the dataset is functional or not.
+
+`src/f1strategy/pretrain/` pre-trains a graph-aware BERT encoder on the Parquet datasets written by `main.py --continuous`.
+There are **no labels and no fine-tuning** here: the output is an encoder checkpoint that fine-tuning (undercut / overcut,
+pit-window, ...) can start from later.
+
+```bash
+pip install torch polars numpy                     # + pytest for the tests
+
+# 1) Parquet datasets -> compact memory-mappable caches (decimated; 10 Hz is interpolated and heavily redundant)
+python -m f1strategy.pretrain.cache --src parquet_datasets --dst cache --stride 5
+
+# 2) pre-train
+python -m f1strategy.pretrain.train --cache cache --out runs/pre1 --preset small --steps 100000 --batch-size 64 --amp
+```
+
+`--preset tiny|small|base` (0.5 M / ~5 M / ~15 M parameters). Resume with `--resume runs/pre1/last.pt`.
+Later: `from f1strategy.pretrain.model import load_encoder; enc = load_encoder("runs/pre1/best.pt"); h = enc.encode(batch)`.
+
+## Model
+
+One token per snapshot element: `[GLOBAL] + 22 driver slots + 128 track tokens` (151 tokens; the 10 m ring is pooled to a fixed
+128 tokens whatever the circuit, so a token is a fixed *fraction of the lap* and circuits share one position vocabulary).
+
+* **Separate input projections** for global / driver / track features, token-type embedding, and a **ring-position embedding shared
+  by cars and track**: a car gets the embedding of the track token it is on.
+* **BERT encoder** (bidirectional, pre-LN, GELU). Driver slots carry no order or identity (slot = alphabetical code in that
+  race), so the encoder is permutation-equivariant over cars (tested).
+* **Graph structure as learned attention bias** per layer and head: circular ring-distance buckets between tokens, and the
+  proximity-edge features of every car pair through a small MLP. Absent cars are masked as keys.
+* **Inputs are `[value * visible, visible]`**, never a silently zeroed value; missing data (Parquet nulls) is "not visible".
+
+## The pretext tasks
+
+Every sample in a batch is assigned one task (default shares A 35 % / B 25 % / C 20 % / D 20 %), so each loss stays clean and
+each task's leakage is controlled on its own.
+
+| | Task | What is hidden | Predicted |
+|---|---|---|---|
+| **A** | Telemetry value regression | 15 % of the (car, channel) cells of `speed_kmh`, `throttle`, `brake`, `rpm` | the hidden values (`brake` is 0/1, so BCE instead of regression) |
+| **B** | Ghost car | **all** features of one random car; the other cars and proximity edges stay | every feature of that car, incl. tyre compound (cross-entropy) |
+| **C** | Flag / marshal-sector condition | *global mode*: all flag bits on all track tokens + all global status flags. *local mode*: yellow / double yellow on a few marshal sectors | yellow / double yellow per track token, `is_yellow/sc/vsc/red/...` from the global token |
+| **D** | Strategy state (added) | 15 % of the (car, group) cells of: compound; tyre age / stint / stops / fresh; pace; gaps + position | the hidden values; this is the signal later fine-tuning for undercut / overcut needs |
+
+### Leakage controls (what makes the tasks non-trivial)
+
+Several inputs restate each other; hiding only the target would turn a task into a copy. Everything below is enforced in
+`masking.py` and covered by `tests/pretrain/`.
+
+* **speed -> `vx_mps`, `vy_mps` are hidden with it**: for a car on track `|v|` is 0.96 x speed (corr. 0.85 on the 2019 Australian GP).
+* **Edge features restating a hidden car feature are hidden on every edge touching that car**: `rel_speed_kmh` (speed), and
+  `gap_s`, `order_neighbor`, `drs_window` (gaps / position).
+* **Flags**: the track flag bits (`flag_sc` etc. equal the global status), the global status flags and `drs_enabled` (switched off
+  under SC) are hidden together; in local mode `is_yellow`, `is_green`, `n_yellow_sectors` are hidden too, since they reveal
+  whether a masked sector is flagged.
+* **Ghost car `ghost_edge_mode`**: `relational` (default, your spec: edges stay visible, only `rel_speed_kmh` and the car's own
+  features are hidden), `topology` (edge existence only; ring position hidden too) or `none`. In `relational` mode the ghost's
+  gaps/progress are largely derivable from its neighbours' edges, so `topology` is the harder, more informative variant.
+* A test overwrites every hidden cell with garbage and requires bit-identical encoder output.
+
+Known soft leak, left in on purpose: a car's time gap divided into the progress difference gives a smoothed speed over the last
+seconds. That is genuine context, not a copy; hide the gap features together with speed if you want to remove it.
+
+## Training details
+
+* Loss: Huber for continuous, BCE for binary, cross-entropy for compound; flags use `pos_weight` (yellow 20, global flags 3).
+  Task losses are averaged over their own target cells then summed with `--task-weights`.
+* **Flagged frames are oversampled** (`--flag-oversample`, default 5x): flags are ~1 % of frames, but they are all of task C.
+* **Validation never splits frames of the same race randomly** (neighbours are near duplicates): whole races are held out when
+  >= 5 are available, else every 10th 180 s block of each race with a 60 s embargo on both sides (interleaved, not cut from the end:
+  the last laps have progress / tyre-age values never seen in training, which would make validation an extrapolation test). Validation runs *every* task with fixed masks and
+  reports physical-unit metrics next to a predict-the-mean baseline (e.g. `val/A_speed_kmh_mae` vs `..._baseline`).
+* AdamW, linear warm-up + cosine decay, grad-clip 1, optional bf16 (`--amp`).
+
+## Data notes (from the 2019 Australian GP file)
+
+* Normalisation is per race (x/y by the circuit bounding box, distances by lap length / race distance, pace centred on the race's
+  median pace; gap features use asinh). Statistics are fixed physical scales, not fitted on data, so a new race needs no refit.
+* The cache keeps every `stride`-th frame (default 5 = 2 Hz) -> ~10 k frames and ~110 MB per race. `--stride 1` keeps all 10 Hz.
+* Driver slots padded to 22, marshal sectors to 40; the cache builder fails loudly if the manifest schema changes.
+
+## Not done / limitations
+
+* No fine-tuning, no downstream heads or labels.
+* Single snapshots only (no temporal context across frames); stacking a window of snapshots is the natural next step.
+* Driver identity / team is not an input (slots are arbitrary per race), so the encoder cannot learn driver-specific behaviour yet.
+* Task C needs flag events in the training data; a race with no SC/VSC contributes only yellow-sector signal.
+
 
 ## Acknowledgements and disclaimer
 

@@ -6,7 +6,6 @@ F1-Obsidian
 # FastF1 cache and generated output
 fastf1_cache
 .fastf1_cache
-graphs
 
 # Python
 __pycache__
@@ -25,3 +24,4 @@ htmlcov
 
 #HUN-REN
 uv.lock
+nohup.out

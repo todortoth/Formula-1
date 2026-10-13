@@ -1,0 +1,40 @@
+[36mStarting full-race F1 Parquet extraction for season 2019...[0m
+[Round 1] Dataset already exists at parquet_datasets/2019_round_1.ds. Skipping.
+[Round 2] Dataset already exists at parquet_datasets/2019_round_2.ds. Skipping.
+[Round 3] Dataset already exists at parquet_datasets/2019_round_3.ds. Skipping.
+[Round 4] Dataset already exists at parquet_datasets/2019_round_4.ds. Skipping.
+[Round 5] Dataset already exists at parquet_datasets/2019_round_5.ds. Skipping.
+[Round 6] Dataset already exists at parquet_datasets/2019_round_6.ds. Skipping.
+[Round 7] Dataset already exists at parquet_datasets/2019_round_7.ds. Skipping.
+[Round 8] Dataset already exists at parquet_datasets/2019_round_8.ds. Skipping.
+[Round 9] Dataset already exists at parquet_datasets/2019_round_9.ds. Skipping.
+[Round 10] Dataset already exists at parquet_datasets/2019_round_10.ds. Skipping.
+[Round 11] Dataset already exists at parquet_datasets/2019_round_11.ds. Skipping.
+[Round 12] Dataset already exists at parquet_datasets/2019_round_12.ds. Skipping.
+[Round 13] Dataset already exists at parquet_datasets/2019_round_13.ds. Skipping.
+[Round 14] Dataset already exists at parquet_datasets/2019_round_14.ds. Skipping.
+[Round 15] Dataset already exists at parquet_datasets/2019_round_15.ds. Skipping.
+[Round 16] Dataset already exists at parquet_datasets/2019_round_16.ds. Skipping.
+[Round 17] Dataset already exists at parquet_datasets/2019_round_17.ds. Skipping.
+[Round 18] Dataset already exists at parquet_datasets/2019_round_18.ds. Skipping.
+[Round 19] Dataset already exists at parquet_datasets/2019_round_19.ds. Skipping.
+[Round 20] Dataset already exists at parquet_datasets/2019_round_20.ds. Skipping.
+[Round 21] Dataset already exists at parquet_datasets/2019_round_21.ds. Skipping.
+[Round 22] Extracting FULL RACE dataset for 2019 (Round 22)...
+Traceback (most recent call last):
+  File "/home/todortoth/F1/F1/main.py", line 20, in <module>
+    sys.exit(main())
+  File "/home/todortoth/F1/F1/src/f1strategy/cli.py", line 291, in main
+    analyzer = SessionAnalyser(
+  File "/home/todortoth/F1/F1/src/f1strategy/session.py", line 83, in __init__
+    session = fastf1.get_session(year, location, session_type)
+  File "/home/todortoth/F1/lib/python3.10/site-packages/fastf1/events.py", line 118, in get_session
+    event = get_event(year, gp, force_ergast=force_ergast, backend=backend)
+  File "/home/todortoth/F1/lib/python3.10/site-packages/fastf1/events.py", line 221, in get_event
+    event = schedule.get_event_by_round(gp)
+  File "/home/todortoth/F1/lib/python3.10/site-packages/fastf1/events.py", line 714, in get_event_by_round
+    raise ValueError(f"Invalid round: {round}")
+ValueError: Invalid round: 22
+[Round 22] Finished or round 22 does not exist for 2019. Finalizing year.
+
+[32mScraping complete for season 2019![0m

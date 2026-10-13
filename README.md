@@ -32,6 +32,7 @@ find optimal strategic decisions; this repository is the data foundation for tha
 - [Project structure](#project-structure)
 - [Migrating from the flat layout](#migrating-from-the-flat-layout)
 - [Bulk export](#bulk export)
+- [Pre training](#self-supervised-pre-training-bert-over-race-snapshots)
 - [Acknowledgements and disclaimer](#acknowledgements-and-disclaimer)
 
 ## Features
@@ -821,8 +822,136 @@ scripts/scape_data.ps1
 scripts/scrape_data.sh
 ```
 
-For exporting all 186 races from 2018 onward use the scrape data powershell/bash script. It iterates through the races
-while exporting the data into the `parquet_datasets` folder.
+For exporting all 152 races from 2019 onward use the scrape data powershell/bash script. It iterates through the races
+while exporting the data into the `parquet_datasets` folder. See [Datasets](#datasets) for more info.
+
+# Self-supervised pre-training (BERT over race snapshots)
+
+- [Model](#model)
+- [The pretest tasks](#the-pretext-tasks)
+- [Leakage controls](#leakage-controls-what-makes-the-tasks-non-trivial)
+- [Training details](#training-details)
+- [Data notes](#data-notes-from-the-2019-australian-gp-file)
+- [Limitations](#not-done--limitations)
+
+### Datasets
+
+```bash
+chmod +x scripts/scrape.sh
+chmod +x scripts/scrape_data.sh
+scripts/scrape.sh
+```
+
+Datasets are pulled from the FastF1 API, all races between 2019 and 2025. Each race generates a dataset in `parquet_datasets`
+with all laps of the race included (except Belgium 2021, which fails with a Data Error). Log files are stored in `scraping_logs`.
+
+To monitor:
+
+```bash
+ps -ef | grep -E "scrape.sh|scrape_data.sh" | grep -v grep
+```
+
+To test the integrity of the dataset use this helper function:
+
+```bash
+python /home/todortoth/F1/F1/tests/test_dataset.py /home/todortoth/F1/F1/parquet_datasets/2019_round_1.ds/sequence_lap1-58/ --out-gif "/home/todortoth/F1/F1/graphs/test.gif"
+```
+
+It generates a gif from the pulled dataset to visualize whether the dataset is functional or not.
+
+`src/f1strategy/pretrain/` pre-trains a graph-aware BERT encoder on the Parquet datasets written by `main.py --continuous`.
+There are **no labels and no fine-tuning** here: the output is an encoder checkpoint that fine-tuning (undercut / overcut,
+pit-window, ...) can start from later.
+
+```bash
+pip install torch polars numpy                     # + pytest for the tests
+
+# 1) Parquet datasets -> compact memory-mappable caches (decimated; 10 Hz is interpolated and heavily redundant)
+python -m f1strategy.pretrain.cache --src parquet_datasets --dst cache --stride 5
+
+# 2) pre-train
+python -m f1strategy.pretrain.train --cache cache --out runs/pre1 --preset small --steps 100000 --batch-size 64 --amp
+```
+
+`--preset tiny|small|base` (0.5 M / ~5 M / ~15 M parameters). Resume with `--resume runs/pre1/last.pt`.
+Later: `from f1strategy.pretrain.model import load_encoder; enc = load_encoder("runs/pre1/best.pt"); h = enc.encode(batch)`.
+
+Monitoring and No-Hang-Up:
+
+```bash
+nohup bash -c "source ../bin/activate && ulimit -n 65536 && python -m f1strategy.pretrain.train --cache cache --out runs/pre1 --preset small --steps 100000 --batch-size 64 --amp" > train.log 2>&1 &
+ps aux | grep f1strategy
+```
+
+## Model
+
+One token per snapshot element: `[GLOBAL] + 22 driver slots + 128 track tokens` (151 tokens; the 10 m ring is pooled to a fixed
+128 tokens whatever the circuit, so a token is a fixed *fraction of the lap* and circuits share one position vocabulary).
+
+* **Separate input projections** for global / driver / track features, token-type embedding, and a **ring-position embedding shared
+  by cars and track**: a car gets the embedding of the track token it is on.
+* **BERT encoder** (bidirectional, pre-LN, GELU). Driver slots carry no order or identity (slot = alphabetical code in that
+  race), so the encoder is permutation-equivariant over cars (tested).
+* **Graph structure as learned attention bias** per layer and head: circular ring-distance buckets between tokens, and the
+  proximity-edge features of every car pair through a small MLP. Absent cars are masked as keys.
+* **Inputs are `[value * visible, visible]`**, never a silently zeroed value; missing data (Parquet nulls) is "not visible".
+
+## The pretext tasks
+
+Every sample in a batch is assigned one task (default shares A 35 % / B 25 % / C 20 % / D 20 %), so each loss stays clean and
+each task's leakage is controlled on its own.
+
+| | Task | What is hidden | Predicted |
+|---|---|---|---|
+| **A** | Telemetry value regression | 15 % of the (car, channel) cells of `speed_kmh`, `throttle`, `brake`, `rpm` | the hidden values (`brake` is 0/1, so BCE instead of regression) |
+| **B** | Ghost car | **all** features of one random car; the other cars and proximity edges stay | every feature of that car, incl. tyre compound (cross-entropy) |
+| **C** | Flag / marshal-sector condition | *global mode*: all flag bits on all track tokens + all global status flags. *local mode*: yellow / double yellow on a few marshal sectors | yellow / double yellow per track token, `is_yellow/sc/vsc/red/...` from the global token |
+| **D** | Strategy state (added) | 15 % of the (car, group) cells of: compound; tyre age / stint / stops / fresh; pace; gaps + position | the hidden values; this is the signal later fine-tuning for undercut / overcut needs |
+
+### Leakage controls (what makes the tasks non-trivial)
+
+Several inputs restate each other; hiding only the target would turn a task into a copy. Everything below is enforced in
+`masking.py` and covered by `tests/pretrain/`.
+
+* **speed -> `vx_mps`, `vy_mps` are hidden with it**: for a car on track `|v|` is 0.96 x speed (corr. 0.85 on the 2019 Australian GP).
+* **Edge features restating a hidden car feature are hidden on every edge touching that car**: `rel_speed_kmh` (speed), and
+  `gap_s`, `order_neighbor`, `drs_window` (gaps / position).
+* **Flags**: the track flag bits (`flag_sc` etc. equal the global status), the global status flags and `drs_enabled` (switched off
+  under SC) are hidden together; in local mode `is_yellow`, `is_green`, `n_yellow_sectors` are hidden too, since they reveal
+  whether a masked sector is flagged.
+* **Ghost car `ghost_edge_mode`**: `relational` (default, your spec: edges stay visible, only `rel_speed_kmh` and the car's own
+  features are hidden), `topology` (edge existence only; ring position hidden too) or `none`. In `relational` mode the ghost's
+  gaps/progress are largely derivable from its neighbours' edges, so `topology` is the harder, more informative variant.
+* A test overwrites every hidden cell with garbage and requires bit-identical encoder output.
+
+Known soft leak, left in on purpose: a car's time gap divided into the progress difference gives a smoothed speed over the last
+seconds. That is genuine context, not a copy; hide the gap features together with speed if you want to remove it.
+
+## Training details
+
+* Loss: Huber for continuous, BCE for binary, cross-entropy for compound; flags use `pos_weight` (yellow 20, global flags 3).
+  Task losses are averaged over their own target cells then summed with `--task-weights`.
+* **Flagged frames are oversampled** (`--flag-oversample`, default 5x): flags are ~1 % of frames, but they are all of task C.
+* **Validation never splits frames of the same race randomly** (neighbours are near duplicates): whole races are held out when
+  >= 5 are available, else every 10th 180 s block of each race with a 60 s embargo on both sides (interleaved, not cut from the end:
+  the last laps have progress / tyre-age values never seen in training, which would make validation an extrapolation test). Validation runs *every* task with fixed masks and
+  reports physical-unit metrics next to a predict-the-mean baseline (e.g. `val/A_speed_kmh_mae` vs `..._baseline`).
+* AdamW, linear warm-up + cosine decay, grad-clip 1, optional bf16 (`--amp`).
+
+## Data notes (from the 2019 Australian GP file)
+
+* Normalisation is per race (x/y by the circuit bounding box, distances by lap length / race distance, pace centred on the race's
+  median pace; gap features use asinh). Statistics are fixed physical scales, not fitted on data, so a new race needs no refit.
+* The cache keeps every `stride`-th frame (default 5 = 2 Hz) -> ~10 k frames and ~110 MB per race. `--stride 1` keeps all 10 Hz.
+* Driver slots padded to 22, marshal sectors to 40; the cache builder fails loudly if the manifest schema changes.
+
+## Not done / limitations
+
+* No fine-tuning, no downstream heads or labels.
+* Single snapshots only (no temporal context across frames); stacking a window of snapshots is the natural next step.
+* Driver identity / team is not an input (slots are arbitrary per race), so the encoder cannot learn driver-specific behaviour yet.
+* Task C needs flag events in the training data; a race with no SC/VSC contributes only yellow-sector signal.
+
 
 ## Acknowledgements and disclaimer
 

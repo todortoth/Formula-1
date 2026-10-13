@@ -16,15 +16,17 @@ mkdir -p "$BASE_OUT_DIR"
 echo -e "\033[36mStarting full-race F1 Parquet extraction for season $TARGET_YEAR...\033[0m"
 
 for ((round=1; round<=25; round++)); do
+    # Pad the round number with a leading zero (e.g., 1 becomes 01)
+    printf -v padded_round "%02d" "$round"
 
-    DATASET_PATH="$BASE_OUT_DIR/${TARGET_YEAR}_round_${round}.ds"
+    DATASET_PATH="$BASE_OUT_DIR/${TARGET_YEAR}_round_${padded_round}.ds"
 
     if [ -d "$DATASET_PATH" ]; then
-        echo -e "[Round $round] Dataset already exists at $DATASET_PATH. Skipping."
+        echo -e "[Round $padded_round] Dataset already exists at $DATASET_PATH. Skipping."
         continue
     fi
 
-    echo -e "[Round $round] Extracting FULL RACE dataset for $TARGET_YEAR (Round $round)..."
+    echo -e "[Round $padded_round] Extracting FULL RACE dataset for $TARGET_YEAR (Round $padded_round)..."
 
     python main.py \
         --year "$TARGET_YEAR" \
@@ -45,15 +47,16 @@ for ((round=1; round<=25; round++)); do
     EXIT_CODE=$?
 
     if [ $EXIT_CODE -ne 0 ]; then
-        echo "[WARNING] Round $round failed with exit code $EXIT_CODE."
+        echo "[WARNING] Round $padded_round failed with exit code $EXIT_CODE."
 
         if [ -d "$DATASET_PATH" ]; then
             rm -rf "$DATASET_PATH"
         fi
 
-        echo "[Round $round] Skipping to next round due to data error."
-        continue
+        echo "[Round $padded_round] Encountered data error or invalid round. Concluding loop for $TARGET_YEAR."
+        break
     fi
 done
 
 echo -e "\n\033[32mScraping complete for season $TARGET_YEAR!\033[0m"
+exit 0
