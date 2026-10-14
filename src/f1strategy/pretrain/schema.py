@@ -46,7 +46,15 @@ GLOBAL_FEATURES = [
     "air_temp", "track_temp", "humidity", "pressure", "rainfall", "wind_speed", "wind_direction_sin",
     "wind_direction_cos", "n_drivers",
 ]  # fmt: skip
-EDGE_FEATURES = ["gap_s", "progress_gap_m", "circular_gap_m", "lap_diff", "rel_speed_kmh", "order_neighbor", "drs_window"]
+EDGE_FEATURES = [
+    "gap_s",
+    "progress_gap_m",
+    "circular_gap_m",
+    "lap_diff",
+    "rel_speed_kmh",
+    "order_neighbor",
+    "drs_window",
+]
 
 F_TRACK_STATIC = len(TRACK_STATIC)
 F_DRIVER = len(DRIVER_FEATURES)
@@ -78,7 +86,14 @@ TELEMETRY_HIDES = {
     "rpm": ["rpm"],
 }
 # physical scale of the normalised value, to report errors in real units
-PHYS_SCALE = {"speed_kmh": 350.0, "throttle": 100.0, "rpm": 13000.0, "tyre_age": 40.0, "pace_last3_s": 3.0, "position": 20.0}
+PHYS_SCALE = {
+    "speed_kmh": 350.0,
+    "throttle": 100.0,
+    "rpm": 13000.0,
+    "tyre_age": 40.0,
+    "pace_last3_s": 3.0,
+    "position": 20.0,
+}
 
 # ----------------------------------------------------------------------------------------------- pretext task D
 # Strategy state groups, masked per driver and group (15 %).
@@ -121,11 +136,15 @@ class RaceNorm:
     pace_ref_s: float = 90.0  # median representative lap pace of the race: pace features are centred on it
 
     @staticmethod
-    def from_track(track_x, track_y, track_z, track_length_m: float, race_distance_m: float, pace_ref_s: float = 90.0) -> RaceNorm:
+    def from_track(
+        track_x, track_y, track_z, track_length_m: float, race_distance_m: float, pace_ref_s: float = 90.0
+    ) -> RaceNorm:
         cx = 0.5 * (float(np.min(track_x)) + float(np.max(track_x)))
         cy = 0.5 * (float(np.min(track_y)) + float(np.max(track_y)))
         sxy = 0.5 * max(float(np.ptp(track_x)), float(np.ptp(track_y)), 1.0)
-        return RaceNorm(float(track_length_m), float(race_distance_m), cx, cy, sxy, float(np.mean(track_z)), float(pace_ref_s))
+        return RaceNorm(
+            float(track_length_m), float(race_distance_m), cx, cy, sxy, float(np.mean(track_z)), float(pace_ref_s)
+        )
 
     def to_dict(self) -> dict:
         return dict(self.__dict__)
@@ -207,4 +226,6 @@ def check_manifest(manifest: dict) -> None:
     }  # fmt: skip
     for key, names in expected.items():
         if list(manifest[key]) != names:
-            raise ValueError(f"manifest '{key}' differs from the schema this package expects:\n  {manifest[key]}\n  {names}")
+            raise ValueError(
+                f"manifest '{key}' differs from the schema this package expects:\n  {manifest[key]}\n  {names}"
+            )

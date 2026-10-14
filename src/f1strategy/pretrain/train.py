@@ -47,7 +47,9 @@ def make_val_items(races, items, n: int, flagged_share: float = 0.5) -> list[tup
 
 
 @torch.no_grad()
-def evaluate(model, masker, races, val_items, device, batch_size, task_weights, seed=1234) -> dict[str, float]:
+def evaluate(
+    model, masker, races, val_items, device, batch_size, task_weights, seed=1234, loss_kw=None, select_tasks="ABCD"
+) -> dict[str, float]:
     model.eval()
     loader = DataLoader(PretrainDataset(races, val_items), batch_size=batch_size, shuffle=False)
     out: dict[str, float] = {}
@@ -59,7 +61,7 @@ def evaluate(model, masker, races, val_items, device, batch_size, task_weights, 
         for raw in loader:
             mb = masker(raw, task=k, generator=g)
             o = model(mb)
-            _, st = compute_losses(o, mb, task_weights)
+            _, st = compute_losses(o, mb, task_weights, **(loss_kw or {}))
             if f"loss_{name}" in st:
                 losses += st[f"loss_{name}"]
                 nb += 1
@@ -70,6 +72,8 @@ def evaluate(model, masker, races, val_items, device, batch_size, task_weights, 
             n_tasks += 1
         out.update({f"val/{m}": v for m, v in met.result().items()})
     out["val/loss"] = tot
+    chosen = [out[f"val/loss_{t}"] for t in select_tasks if f"val/loss_{t}" in out]
+    out["val/select_loss"] = sum(chosen) / max(1, len(chosen))  # what best.pt is chosen on
     model.train()
     return out
 
@@ -103,11 +107,30 @@ def main(argv=None) -> None:
     ap.add_argument("--task-probs", default="A=0.35,B=0.25,C=0.20,D=0.20", help="share of samples per pretext task")
     ap.add_argument("--task-weights", default="A=1,B=1,C=1,D=1", help="loss weight per task")
     ap.add_argument("--ghost-edge-mode", default="relational", choices=["relational", "topology", "none"])
+    ap.add_argument(
+        "--yellow-pos-weight",
+        type=float,
+        default=20.0,
+        help="task C: BCE positive weight, yellow / double yellow tokens",
+    )
+    ap.add_argument(
+        "--global-pos-weight", type=float, default=3.0, help="task C: BCE positive weight, global status flags"
+    )
+    ap.add_argument(
+        "--select-tasks",
+        default="ABD",
+        help="best.pt = lowest mean val loss over these tasks (C is noisy: few flag events)",
+    )
     ap.add_argument("--p-cell", type=float, default=0.15)
     ap.add_argument("--p-group", type=float, default=0.15)
     ap.add_argument("--flag-oversample", type=float, default=5.0)
     ap.add_argument("--val-frac", type=float, default=0.1)
-    ap.add_argument("--embargo-s", type=float, default=60.0, help="few-race setting: seconds dropped on both sides of a validation block")
+    ap.add_argument(
+        "--embargo-s",
+        type=float,
+        default=60.0,
+        help="few-race setting: seconds dropped on both sides of a validation block",
+    )
     ap.add_argument("--block-s", type=float, default=180.0, help="few-race setting: length of the held-out time blocks")
     ap.add_argument("--eval-every", type=int, default=2000)
     ap.add_argument("--eval-frames", type=int, default=512)
@@ -132,11 +155,18 @@ def main(argv=None) -> None:
         raise SystemExit("empty train or validation split")
     weights = frame_weights(races, split.train, a.flag_oversample)
     val_items = make_val_items(races, split.val, a.eval_frames)
-    print(f"{len(races)} races | train frames {len(split.train)} (flagged x{a.flag_oversample:g}) | val frames {len(val_items)} of {len(split.val)}")
+    print(
+        f"{len(races)} races | train frames {len(split.train)} (flagged x{a.flag_oversample:g}) | val frames {len(val_items)} of {len(split.val)}"
+    )
     print(f"validation: {split.val_races}")
 
     task_w = parse_task_values(a.task_weights, normalise=False)
-    mcfg = MaskConfig(task_probs=parse_task_values(a.task_probs, normalise=True), p_cell=a.p_cell, p_group=a.p_group, ghost_edge_mode=a.ghost_edge_mode)
+    mcfg = MaskConfig(
+        task_probs=parse_task_values(a.task_probs, normalise=True),
+        p_cell=a.p_cell,
+        p_group=a.p_group,
+        ghost_edge_mode=a.ghost_edge_mode,
+    )
     masker = Masker(mcfg, device)
     cfg = F1BertConfig.preset(a.preset, dropout=a.dropout, n_track_tokens=races[0].meta["n_track_tokens"])
     model = F1Bert(cfg).to(device)
@@ -158,9 +188,10 @@ def main(argv=None) -> None:
     )  # fmt: skip
     log = open(out / "log.jsonl", "a")
     (out / "args.json").write_text(json.dumps(vars(a), indent=1))
+    loss_kw = {"yellow_pos_weight": a.yellow_pos_weight, "global_pos_weight": a.global_pos_weight}
     amp = torch.autocast(device.type, dtype=torch.bfloat16) if a.amp else torch.autocast(device.type, enabled=False)
     run: dict[str, float] = {}
-    t0 = time.time()
+    t_last, step_last = time.time(), step
     model.train()
     for raw in loader:
         for g in opt.param_groups:
@@ -168,7 +199,7 @@ def main(argv=None) -> None:
         mb = masker(raw)
         with amp:
             o = model(mb)
-        loss, st = compute_losses(o, mb, task_w)
+        loss, st = compute_losses(o, mb, task_w, **loss_kw)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         gn = torch.nn.utils.clip_grad_norm_(model.parameters(), a.clip)
@@ -177,17 +208,36 @@ def main(argv=None) -> None:
         for k, v in st.items():
             run[k] = run.get(k, 0.0) * 0.98 + v * 0.02 if k in run else v  # EMA for the console
         if step % a.log_every == 0:
-            msg = " ".join(f"{k.replace('loss_', '')}={run[k]:.3f}" for k in ("loss", *[f"loss_{t}" for t in TASKS]) if k in run)
-            print(f"step {step:>7} | {msg} | gnorm {gn:.2f} | lr {opt.param_groups[0]['lr']:.2e} | {(time.time() - t0) / max(1, step):.2f}s/step", flush=True)
+            msg = " ".join(
+                f"{k.replace('loss_', '')}={run[k]:.3f}" for k in ("loss", *[f"loss_{t}" for t in TASKS]) if k in run
+            )
+            print(
+                f"step {step:>7} | {msg} | gnorm {gn:.2f} | lr {opt.param_groups[0]['lr']:.2e} | {(time.time() - t_last) / (step - step_last):.2f}s/step",
+                flush=True,
+            )
+            t_last, step_last = time.time(), step
             log.write(json.dumps({"step": step, **{k: float(v) for k, v in st.items()}, "gnorm": float(gn)}) + "\n")
             log.flush()
         if step % a.eval_every == 0 or step == a.steps:
-            ev = evaluate(model, masker, races, val_items, device, a.batch_size, task_w)
-            print(f"  [val @ {step}] loss {ev['val/loss']:.4f} | " + " ".join(f"{t}={ev.get(f'val/loss_{t}', float('nan')):.3f}" for t in TASKS))
+            ev = evaluate(
+                model,
+                masker,
+                races,
+                val_items,
+                device,
+                a.batch_size,
+                task_w,
+                loss_kw=loss_kw,
+                select_tasks=a.select_tasks,
+            )
+            print(
+                f"  [val @ {step}] select({a.select_tasks}) {ev['val/select_loss']:.4f} | all {ev['val/loss']:.4f} | "
+                + " ".join(f"{t}={ev.get(f'val/loss_{t}', float('nan')):.3f}" for t in TASKS)
+            )
             log.write(json.dumps({"step": step, **ev}) + "\n")
             log.flush()
-            if ev["val/loss"] < best:
-                best = ev["val/loss"]
+            if ev["val/select_loss"] < best:
+                best = ev["val/select_loss"]
                 save_ckpt(out / "best.pt", model, opt, step, cfg, a, best)
         if step % a.save_every == 0 or step == a.steps:
             save_ckpt(out / "last.pt", model, opt, step, cfg, a, best)

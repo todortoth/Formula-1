@@ -43,16 +43,22 @@ def compute_losses(
     stats: dict[str, float] = {}
 
     cell = _cell_loss(pred, mb.drv_x, _BIN_D)  # [B, D, F]
-    ce = F.cross_entropy(pred[..., _COMP.to(dev)].reshape(-1, len(_COMP)), mb.comp_idx.reshape(-1), reduction="none").view(mb.comp_idx.shape)
+    ce = F.cross_entropy(
+        pred[..., _COMP.to(dev)].reshape(-1, len(_COMP)), mb.comp_idx.reshape(-1), reduction="none"
+    ).view(mb.comp_idx.shape)
 
     # global-token loss (task C): pos_weight on the binary flag features
     gp = out["global"].float()
-    g_bce = F.binary_cross_entropy_with_logits(gp, mb.glb_x.clamp(0, 1), reduction="none", pos_weight=gp.new_tensor(global_pos_weight))
+    g_bce = F.binary_cross_entropy_with_logits(
+        gp, mb.glb_x.clamp(0, 1), reduction="none", pos_weight=gp.new_tensor(global_pos_weight)
+    )
     g_cell = torch.where(_BIN_G.to(dev), g_bce, F.huber_loss(gp, mb.glb_x, reduction="none", delta=1.0))
-    fl = F.binary_cross_entropy_with_logits(out["flags"].float(), mb.flag_x[..., :2], reduction="none", pos_weight=gp.new_tensor(yellow_pos_weight))
+    fl = F.binary_cross_entropy_with_logits(
+        out["flags"].float(), mb.flag_x[..., :2], reduction="none", pos_weight=gp.new_tensor(yellow_pos_weight)
+    )
 
     for k, name in enumerate(TASKS):
-        sel = (mb.task == k)
+        sel = mb.task == k
         if not sel.any():
             continue
         s3 = sel[:, None, None]

@@ -25,7 +25,6 @@ Heads (used only for pre-training and thrown away afterwards; ``F1Bert.encode`` 
 
 from __future__ import annotations
 
-import math
 from dataclasses import asdict, dataclass
 
 import torch
@@ -36,9 +35,9 @@ from f1strategy.pretrain import schema as S
 from f1strategy.pretrain.masking import MaskedBatch
 
 PRESETS = {
-    "tiny": dict(hidden=128, layers=2, heads=4, ffn=512),  # smoke tests / CPU
-    "small": dict(hidden=256, layers=6, heads=8, ffn=1024),  # ~5 M parameters
-    "base": dict(hidden=384, layers=8, heads=8, ffn=1536),  # ~15 M parameters
+    "tiny": {"hidden": 128, "layers": 2, "heads": 4, "ffn": 512},  # smoke tests / CPU
+    "small": {"hidden": 256, "layers": 6, "heads": 8, "ffn": 1024},  # ~5 M parameters
+    "base": {"hidden": 384, "layers": 8, "heads": 8, "ffn": 1536},  # ~15 M parameters
 }
 N_DIST_BUCKETS = 24
 
@@ -74,7 +73,9 @@ class Block(nn.Module):
     def forward(self, x: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
         B, T, H = x.shape
         q, k, v = self.qkv(self.ln1(x)).view(B, T, 3, self.heads, H // self.heads).permute(2, 0, 3, 1, 4)
-        a = F.scaled_dot_product_attention(q, k, v, attn_mask=bias.to(q.dtype), dropout_p=self.p if self.training else 0.0)
+        a = F.scaled_dot_product_attention(
+            q, k, v, attn_mask=bias.to(q.dtype), dropout_p=self.p if self.training else 0.0
+        )
         x = x + self.drop(self.out(a.transpose(1, 2).reshape(B, T, H)))
         return x + self.drop(self.ff(self.ln2(x)))
 
@@ -100,7 +101,9 @@ class F1Bert(nn.Module):
         self.final_ln = nn.LayerNorm(h)
         # attention biases
         self.dist_bias = nn.Parameter(torch.zeros(cfg.layers, N_DIST_BUCKETS + 2, cfg.heads))
-        self.edge_mlp = nn.Sequential(nn.Linear(2 * S.F_EDGE + 1, cfg.edge_hidden), nn.GELU(), nn.Linear(cfg.edge_hidden, cfg.edge_hidden))
+        self.edge_mlp = nn.Sequential(
+            nn.Linear(2 * S.F_EDGE + 1, cfg.edge_hidden), nn.GELU(), nn.Linear(cfg.edge_hidden, cfg.edge_hidden)
+        )
         self.edge_to_bias = nn.ModuleList(nn.Linear(cfg.edge_hidden, cfg.heads) for _ in range(cfg.layers))
         # pre-training heads
         self.driver_head = _head(h, S.F_DRIVER)
@@ -139,12 +142,17 @@ class F1Bert(nn.Module):
     def _bias(self, mb: MaskedBatch, ring: torch.Tensor) -> list[torch.Tensor]:
         """Additive attention bias per layer: [B, heads, T, T]."""
         B, T = ring.shape
-        D, M = self.D, self.M
+        _, M = self.D, self.M
         dev = ring.device
         unknown = ring == M  # global token and hidden-position cars
         diff = (ring[:, :, None] - ring[:, None, :]).abs()
         dist = torch.minimum(diff, M - diff).float()
-        bucket = torch.where(dist < 16, dist, 16 + torch.log2(dist.clamp(min=16) / 16) * 2).floor().clamp(max=N_DIST_BUCKETS - 1).long()
+        bucket = (
+            torch.where(dist < 16, dist, 16 + torch.log2(dist.clamp(min=16) / 16) * 2)
+            .floor()
+            .clamp(max=N_DIST_BUCKETS - 1)
+            .long()
+        )
         is_global = torch.zeros(B, T, dtype=torch.bool, device=dev)
         is_global[:, 0] = True
         pair_global = is_global[:, :, None] | is_global[:, None, :]
@@ -152,15 +160,22 @@ class F1Bert(nn.Module):
         bucket = torch.where(pair_global, torch.full_like(bucket, N_DIST_BUCKETS), bucket)
         bucket = torch.where(pair_unknown, torch.full_like(bucket, N_DIST_BUCKETS + 1), bucket)
         # keys: absent drivers cannot be attended to
-        key_ok = torch.cat([torch.ones(B, 1, dtype=torch.bool, device=dev), mb.present, torch.ones(B, M, dtype=torch.bool, device=dev)], 1)
+        key_ok = torch.cat(
+            [
+                torch.ones(B, 1, dtype=torch.bool, device=dev),
+                mb.present,
+                torch.ones(B, M, dtype=torch.bool, device=dev),
+            ],
+            1,
+        )
         pad = torch.zeros(B, 1, 1, T, device=dev).masked_fill(~key_ok[:, None, None, :], -1e9)
         # driver-driver edges
         e_in = torch.cat([mb.edge_x * mb.edge_vis, mb.edge_vis.float(), mb.edge_exists[..., None].float()], -1)
         e_h = self.edge_mlp(e_in)  # [B, D, D, eh]
         out = []
-        for l in range(self.cfg.layers):
-            b = self.dist_bias[l][bucket].permute(0, 3, 1, 2)  # [B, H, T, T]
-            eb = self.edge_to_bias[l](e_h).permute(0, 3, 1, 2)  # [B, H, D, D]
+        for layer_idx in range(self.cfg.layers):
+            b = self.dist_bias[layer_idx][bucket].permute(0, 3, 1, 2)  # [B, H, T, T]
+            eb = self.edge_to_bias[layer_idx](e_h).permute(0, 3, 1, 2)  # [B, H, D, D]
             eb = F.pad(eb, (1, M, 1, M))  # place on the driver block
             out.append(b + eb + pad)
         return out
@@ -168,7 +183,7 @@ class F1Bert(nn.Module):
     def encode(self, mb: MaskedBatch) -> torch.Tensor:
         """Hidden states [B, T, hidden] (the part kept for fine-tuning later)."""
         x, ring = self._tokens(mb)
-        for blk, bias in zip(self.blocks, self._bias(mb, ring)):
+        for blk, bias in zip(self.blocks, self._bias(mb, ring), strict=False):
             x = blk(x, bias)
         return self.final_ln(x)
 

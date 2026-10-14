@@ -774,11 +774,20 @@ Formula-1/
 │   ├── graph/
 │   │   ├── builder.py            RaceGraphBuilder: networkx graph at a time
 │   │   └── exporter.py           GraphExporter / GraphArrays: fixed-schema arrays
-│   └── sequence/
-│       ├── sampling.py           time_grid
-│       ├── builder.py            SequenceBuilder: dense (graph-free) frames, chunked
-│       ├── dataset.py            RaceSequence: compact continuous dataset
-│       └── parquet.py            ParquetSequenceWriter / ParquetSequence (Polars)
+│   ├── sequence/
+│   │   ├── sampling.py           time_grid
+│   │   ├── builder.py            SequenceBuilder: dense (graph-free) frames, chunked
+│   │   ├── dataset.py            RaceSequence: compact continuous dataset
+│   │   └── parquet.py            ParquetSequenceWriter / ParquetSequence (Polars)
+│   └── pretrain/
+│       ├── bench.py              cpu and gpu benchmark
+│       ├── cache.py              build race cahce
+│       ├── data.py               RaceCache: datasets over the race cahce
+│       ├── losses.py             per-task losses and validation metrics
+│       ├── masking.py            pre-training tasks
+│       ├── model.py              BERT
+│       ├── schema.py             pre-training groups
+│       └── train.py              self-supervised pre-training
 ├── tests/                        unit/, integration/, live/, synthetic/
 ├── docs/                         readme_template.md and the figures used in the README
 └── .github/workflows/            ci.yml, live-data.yml
@@ -870,7 +879,11 @@ pip install torch polars numpy                     # + pytest for the tests
 python -m f1strategy.pretrain.cache --src parquet_datasets --dst cache --stride 5
 
 # 2) pre-train
-python -m f1strategy.pretrain.train --cache cache --out runs/pre1 --preset small --steps 100000 --batch-size 64 --amp
+python -m f1strategy.pretrain.train --cache cache --out runs/pre1 --preset small --steps 100000 --batch-size 64 --amp --workers 8
+# Recommended optional parameters:
+python -m f1strategy.pretrain.train --cache cache --out runs/pre1 --preset small --steps 100000 --batch-size 64 --amp --workers 8 --flag-oversample 2 --yellow-pos-weight 5 --task-weights A=1,B=1,C=0.5,D=1 --steps 35000
+# Recommended optional parameters after first training, not tested:
+python -m f1strategy.pretrain.train --cache cache --out runs/pre1 --preset small --steps 100000 --batch-size 64 --amp --workers 8 --flag-oversample 2 --yellow-pos-weight 5 --task-weights A=1,B=1,C=0.1,D=1 --steps 35000 --dropout 0.2 --weight-decay 0.05 --p-group 0.3 --eval-frames 2048
 ```
 
 `--preset tiny|small|base` (0.5 M / ~5 M / ~15 M parameters). Resume with `--resume runs/pre1/last.pt`.
@@ -879,7 +892,7 @@ Later: `from f1strategy.pretrain.model import load_encoder; enc = load_encoder("
 Monitoring and No-Hang-Up:
 
 ```bash
-nohup bash -c "source ../bin/activate && ulimit -n 65536 && python -m f1strategy.pretrain.train --cache cache --out runs/pre1 --preset small --steps 100000 --batch-size 64 --amp" > train.log 2>&1 &
+nohup bash -c "source ../bin/activate && ulimit -n 65536 && python -m f1strategy.pretrain.train --cache cache --out runs/pre1 --preset small --steps 100000 --batch-size 64 --amp --workers 8" > train.log 2>&1 &
 ps aux | grep f1strategy
 ```
 

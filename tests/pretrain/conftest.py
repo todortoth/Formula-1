@@ -30,7 +30,13 @@ def make_synthetic_dataset(root: Path, seed: int = 0) -> Path:
     rows = []
     for f in range(N_FRAMES):
         for slot in range(N_DRV):
-            r = {"frame": f, "t": 100 + 0.1 * f, "driver": f"D{slot:02d}", "slot": slot, "track_node": int((f * 3 + slot * 25) % N_NODES)}
+            r = {
+                "frame": f,
+                "t": 100 + 0.1 * f,
+                "driver": f"D{slot:02d}",
+                "slot": slot,
+                "track_node": int((f * 3 + slot * 25) % N_NODES),
+            }
             for n in S.DRIVER_FEATURES:
                 r[n] = float(rng.uniform(0, 1))
             for n in S.BIN_DRIVER:
@@ -41,7 +47,9 @@ def make_synthetic_dataset(root: Path, seed: int = 0) -> Path:
             r["gap_ahead_s"] = None if slot == 0 else float(rng.uniform(0, 5))
             r["speed_kmh"] = float(rng.uniform(50, 330))
             rows.append(r)
-    pl.DataFrame(rows).cast({c: pl.Float32 for c in S.DRIVER_FEATURES}).write_parquet(ds / "drivers" / "part-00000.parquet")
+    pl.DataFrame(rows).cast(dict.fromkeys(S.DRIVER_FEATURES, pl.Float32)).write_parquet(
+        ds / "drivers" / "part-00000.parquet"
+    )
 
     g = []
     for f in range(N_FRAMES):
@@ -52,7 +60,9 @@ def make_synthetic_dataset(root: Path, seed: int = 0) -> Path:
                  sc_in_this_lap=float(sc), yellow_unlocalised=0.0, n_yellow_sectors=2.0 if yel else 0.0, drs_enabled=float(not sc),
                  yellow_sectors=[3] if yel else [], double_yellow_sectors=[5] if yel else [])  # fmt: skip
         g.append(r)
-    pl.DataFrame(g, schema_overrides={"yellow_sectors": pl.List(pl.Int16), "double_yellow_sectors": pl.List(pl.Int16)}).write_parquet(ds / "global" / "part-00000.parquet")
+    pl.DataFrame(
+        g, schema_overrides={"yellow_sectors": pl.List(pl.Int16), "double_yellow_sectors": pl.List(pl.Int16)}
+    ).write_parquet(ds / "global" / "part-00000.parquet")
 
     e = []
     for f in range(N_FRAMES):

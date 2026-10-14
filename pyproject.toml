@@ -63,9 +63,11 @@ filterwarnings = [
     "error",
     # third-party noise: older matplotlib calls pyparsing's deprecated camelCase API
     "ignore::pyparsing.warnings.PyparsingDeprecationWarning",
+    # Ignore the early evaluation warning for unknown marks
+    "ignore::_pytest.warning_types.PytestUnknownMarkWarning",
 ]
 markers = [
-    "live: needs network access to the real FastF1 / F1 live timing API (deselected by default, run with -m live)",
+    "live: needs network access to the real FastF1 / F1 live timing API (deselected by default, run with -m live)"
 ]
 
 # ---------------------------------------------------------------- coverage

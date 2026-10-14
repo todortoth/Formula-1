@@ -7,8 +7,8 @@ import torch
 from torch.utils.data import DataLoader
 
 from f1strategy.pretrain import schema as S
-from f1strategy.pretrain.data import PretrainDataset, RaceCache, frame_weights, open_races, split_races
-from f1strategy.pretrain.losses import Metrics, compute_losses
+from f1strategy.pretrain.data import PretrainDataset, frame_weights, open_races, split_races
+from f1strategy.pretrain.losses import compute_losses
 from f1strategy.pretrain.masking import MaskConfig, Masker
 from f1strategy.pretrain.model import F1Bert, F1BertConfig, load_encoder
 
@@ -65,7 +65,9 @@ def test_split_blocks_embargo_and_no_overlap(races):
     tr, va = np.array(sorted(f for _, f in sp.train)), np.array(sorted(f for _, f in sp.val))
     assert len(tr) and len(va) and not set(tr) & set(va)
     assert {i // 5 for i in va} == {3, 7, 11}  # every 4th block, interleaved over the whole race
-    assert min(abs(t - v) for t in tr for v in va) > 2  # embargo: no training frame within 2 frames of a validation frame
+    assert (
+        min(abs(t - v) for t in tr for v in va) > 2
+    )  # embargo: no training frame within 2 frames of a validation frame
     assert tr.min() < va.min() and tr.max() > va.min()  # not cut from the end of the race
 
 
@@ -121,10 +123,13 @@ def test_flag_global_mode_hides_every_flag_signal(raw):
     assert not mb.glb_vis[:, gcols].any()
     rest = [i for i in range(S.F_GLOBAL) if i not in gcols]
     assert mb.glb_vis[:, rest].all() and not mb.glb_tgt[:, rest].any()
-    yellow_frames = (mb.flag_x[..., 0].sum(1) > 0)
+    yellow_frames = mb.flag_x[..., 0].sum(1) > 0
     assert yellow_frames.any() and mb.flag_tgt[..., 0].any()  # yellow sectors exist and are targets
     # the truth that the head is trained on really is the sector state from the data
-    np.testing.assert_array_equal(mb.flag_x[0, :, 0].bool().numpy(), (raw["ysec"][0].gather(0, (raw["tmar"][0] - 1).clamp(min=0)) & (raw["tmar"][0] > 0)).numpy())
+    np.testing.assert_array_equal(
+        mb.flag_x[0, :, 0].bool().numpy(),
+        (raw["ysec"][0].gather(0, (raw["tmar"][0] - 1).clamp(min=0)) & (raw["tmar"][0] > 0)).numpy(),
+    )
 
 
 def test_flag_local_mode_hides_only_chosen_sectors(raw):
@@ -132,7 +137,9 @@ def test_flag_local_mode_hides_only_chosen_sectors(raw):
     hid = ~mb.flag_vis[..., 0]  # tokens whose yellow bit is hidden
     assert hid.any() and not hid.all()
     assert mb.flag_vis[..., 2:].all()  # SC / VSC / red stay visible in local mode
-    assert mb.glb_vis[:, GI["is_sc"]].all() and not mb.glb_vis[:, GI["is_yellow"]].any()  # summary that would reveal it is hidden
+    assert (
+        mb.glb_vis[:, GI["is_sc"]].all() and not mb.glb_vis[:, GI["is_yellow"]].any()
+    )  # summary that would reveal it is hidden
     assert not mb.glb_vis[:, GI["n_yellow_sectors"]].any()
     # all tokens of a masked marshal sector are hidden together
     tm = mb.flag_vis[..., 0].numpy()
@@ -185,7 +192,11 @@ def test_forward_backward_all_tasks(tiny, raw, task):
     small = {k: v[:8] for k, v in raw.items()}
     mb = mask(small, task, ghost_edge_mode="topology")
     out = tiny(mb)
-    assert out["driver"].shape == (8, 22, S.F_DRIVER) and out["flags"].shape == (8, 32, 2) and out["global"].shape == (8, S.F_GLOBAL)
+    assert (
+        out["driver"].shape == (8, 22, S.F_DRIVER)
+        and out["flags"].shape == (8, 32, 2)
+        and out["global"].shape == (8, S.F_GLOBAL)
+    )
     loss, st = compute_losses(out, mb)
     assert torch.isfinite(loss) and f"loss_{'ABCD'[task]}" in st
     tiny.zero_grad()
@@ -209,7 +220,12 @@ def test_output_independent_of_hidden_values(tiny, raw):
             with torch.no_grad():
                 o1, o2 = tiny(mb), tiny(mb2)
             for k in ("driver", "flags", "global"):
-                torch.testing.assert_close(o1[k][mb.present] if k == "driver" else o1[k], o2[k][mb.present] if k == "driver" else o2[k], atol=1e-5, rtol=1e-4)
+                torch.testing.assert_close(
+                    o1[k][mb.present] if k == "driver" else o1[k],
+                    o2[k][mb.present] if k == "driver" else o2[k],
+                    atol=1e-5,
+                    rtol=1e-4,
+                )
 
 
 def test_driver_slots_are_permutation_equivariant(tiny, raw):
@@ -260,6 +276,7 @@ def test_loss_goes_down_on_a_fixed_batch(raw):
     assert last < 0.7 * first
 
 
+@pytest.mark.filterwarnings("ignore::ResourceWarning")
 def test_train_cli_and_checkpoint_roundtrip(cache_dir, tmp_path):
     from f1strategy.pretrain.train import main
 

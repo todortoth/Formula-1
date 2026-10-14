@@ -107,7 +107,9 @@ class Masker:
         self.probs = torch.tensor(self.cfg.task_probs, dtype=torch.float32, device=d)
 
     # ------------------------------------------------------------------------------------------------------------
-    def __call__(self, raw: dict[str, torch.Tensor], task: int | None = None, generator: torch.Generator | None = None) -> MaskedBatch:
+    def __call__(
+        self, raw: dict[str, torch.Tensor], task: int | None = None, generator: torch.Generator | None = None
+    ) -> MaskedBatch:
         """``raw``: a collated batch from ``PretrainDataset`` (any device). ``task`` forces one task for all samples
         (evaluation); ``generator`` makes the masks reproducible."""
         dev, cfg = self.device, self.cfg
@@ -180,7 +182,7 @@ class Masker:
             tok_vis &= ~ghost
 
         # ---- edges: hide what restates a masked driver feature ----------------------------------------------
-        inc = lambda m: (m[:, :, None] | m[:, None, :])  # noqa: E731 - edges touching a masked car (either end)
+        inc = lambda m: m[:, :, None] | m[:, None, :]  # noqa: E731 - edges touching a masked car (either end)
         eh = torch.zeros(B, D, D, Fe, dtype=torch.bool, device=dev)
         eh_exists = torch.zeros(B, D, D, dtype=torch.bool, device=dev)
         spd = inc(hide_speed | ghost)

@@ -90,7 +90,9 @@ def build_race_cache(
         raise ValueError(f"{len(manifest['driver_codes'])} drivers > max_drivers={D}")
 
     track = pl.read_parquet(ds_dir / "track.parquet").sort("node")
-    pace = pl.scan_parquet(ds_dir / "drivers" / "part-*.parquet").select(pl.col("pace_last3_s").median()).collect().item()
+    pace = (
+        pl.scan_parquet(ds_dir / "drivers" / "part-*.parquet").select(pl.col("pace_last3_s").median()).collect().item()
+    )
     rn = S.RaceNorm.from_track(
         track["x_m"].to_numpy(), track["y_m"].to_numpy(), track["z_m"].to_numpy(),
         manifest["track_length_m"], manifest["race_distance_m"], pace if pace is not None else 90.0,

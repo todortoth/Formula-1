@@ -103,9 +103,11 @@ def split_races(
         val_ids = set(rng.choice(len(races), n_val, replace=False).tolist())
         for ri, v in enumerate(valid):
             (va if ri in val_ids else tr).extend((ri, int(i)) for i in np.flatnonzero(v))
-        return Split(tr, va, [r.name for i, r in enumerate(races) if i not in val_ids], [races[i].name for i in sorted(val_ids)])
+        return Split(
+            tr, va, [r.name for i, r in enumerate(races) if i not in val_ids], [races[i].name for i in sorted(val_ids)]
+        )
     k = max(2, round(1 / val_frac))
-    for ri, (r, v) in enumerate(zip(races, valid)):
+    for ri, (r, v) in enumerate(zip(races, valid, strict=False)):
         block = max(1, int(round(block_s / r.meta["step_s"])))
         gap = int(round(embargo_s / r.meta["step_s"]))
         for i in np.flatnonzero(v):
@@ -143,7 +145,9 @@ class PretrainDataset(Dataset):
 def open_races(cache_dir: str | Path) -> list[RaceCache]:
     paths = sorted(p.parent for p in Path(cache_dir).rglob("meta.json"))
     if not paths:
-        raise FileNotFoundError(f"no race caches under {cache_dir}; run: python -m f1strategy.pretrain.cache --src ... --dst {cache_dir}")
+        raise FileNotFoundError(
+            f"no race caches under {cache_dir}; run: python -m f1strategy.pretrain.cache --src ... --dst {cache_dir}"
+        )
     races = [RaceCache(p) for p in paths]
     ntok = {r.meta["n_track_tokens"] for r in races}
     if len(ntok) != 1:

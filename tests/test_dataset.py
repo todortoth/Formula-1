@@ -2,6 +2,7 @@
 import argparse
 import os
 from pathlib import Path
+
 from f1strategy import ParquetSequence, RaceAnimator
 
 
@@ -56,12 +57,12 @@ def verify_and_animate_dataset(dataset_dir: str | Path, output_gif: str | Path, 
     # Resolve out folder if it doesn't exist yet
     os.makedirs(Path(output_gif).parent, exist_ok=True)
 
-    title_label = getattr(ds, 'location', dataset_path.name)
+    title_label = getattr(ds, "location", dataset_path.name)
 
     animator = RaceAnimator(
         sequence=seq_gif,
         colors=None,  # Automatically falls back to internal team colors if available
-        title=f"Verification Check: {title_label}"
+        title=f"Verification Check: {title_label}",
     )
 
     animator.save_gif(output_gif, every=1, fps=target_fps)
@@ -73,21 +74,17 @@ def main():
         description="Verify an existing F1 Parquet dataset and generate a fast diagnostic GIF."
     )
     parser.add_argument(
-        "dataset",
-        type=str,
-        help="Path to the target dataset directory (e.g., parquet_datasets/2025_round_1.ds)"
+        "dataset", type=str, help="Path to the target dataset directory (e.g., parquet_datasets/2025_round_1.ds)"
     )
     parser.add_argument(
-        "--out-gif", "-o",
+        "--out-gif",
+        "-o",
         type=str,
         default=None,
-        help="Path where the verification GIF should be saved. (Default: inside a 'graphs' folder next to the dataset)"
+        help="Path where the verification GIF should be saved. (Default: inside a 'graphs' folder next to the dataset)",
     )
     parser.add_argument(
-        "--fps",
-        type=float,
-        default=12.0,
-        help="Target playback frames per second for the GIF output (Default: 12.0)"
+        "--fps", type=float, default=12.0, help="Target playback frames per second for the GIF output (Default: 12.0)"
     )
 
     args = parser.parse_args()
@@ -98,11 +95,7 @@ def main():
         args.out_gif = f"graphs/{dataset_name}_verification.gif"
 
     try:
-        verify_and_animate_dataset(
-            dataset_dir=args.dataset,
-            output_gif=args.out_gif,
-            target_fps=args.fps
-        )
+        verify_and_animate_dataset(dataset_dir=args.dataset, output_gif=args.out_gif, target_fps=args.fps)
     except Exception as e:
         print(f"Error: {e}")
         return 1
