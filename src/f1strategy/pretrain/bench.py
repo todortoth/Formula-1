@@ -2,6 +2,7 @@
 
 python -m f1strategy.pretrain.bench --cache cache --batch-size 64 --amp
 python -m f1strategy.pretrain.bench --cache cache --batch-size 256 --amp --dropout 0.0
+python -m f1strategy.pretrain.bench --cache cache --batch-size 64 --amp --profile   # + the most expensive ops
 """
 
 import argparse
@@ -24,6 +25,7 @@ def main(argv=None) -> None:
     ap.add_argument("--dropout", type=float, default=0.1)
     ap.add_argument("--amp", action="store_true")
     ap.add_argument("--iters", type=int, default=20)
+    ap.add_argument("--profile", action="store_true", help="also print the most expensive ops of one step")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     a = ap.parse_args(argv)
     dev = torch.device(a.device)
@@ -68,6 +70,19 @@ def main(argv=None) -> None:
         + " | ".join(f"{k} {v / n * 1000:.0f} ms" for k, v in acc.items())
         + f" | total {sum(acc.values()) / n * 1000:.0f} ms"
     )
+    if a.profile:
+        from torch.profiler import ProfilerActivity, profile
+
+        acts = [ProfilerActivity.CPU] + ([ProfilerActivity.CUDA] if dev.type == "cuda" else [])
+        with profile(activities=acts) as prof:
+            with amp:
+                out = model(mb)
+            loss, _ = compute_losses(out, mb)
+            opt.zero_grad()
+            loss.backward()
+            sync()
+        key = "self_cuda_time_total" if dev.type == "cuda" else "self_cpu_time_total"
+        print(prof.key_averages().table(sort_by=key, row_limit=8, max_name_column_width=44))
     if dev.type == "cuda":
         print(f"peak GPU memory {torch.cuda.max_memory_allocated() / 2**30:.1f} GiB")
 

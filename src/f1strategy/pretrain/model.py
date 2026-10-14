@@ -134,9 +134,13 @@ class F1Bert(nn.Module):
         ring_d = torch.where(mb.tok_vis, mb.tok, torch.full_like(mb.tok, M))
         ring_t = torch.arange(M, device=dev).expand(B, M)
         x = torch.cat([g, d, t], 1)
-        kinds = torch.cat([torch.zeros(B, 1), torch.ones(B, D), torch.full((B, M), 2.0)], 1).long().to(dev)
         ring = torch.cat([torch.full((B, 1), M, device=dev), ring_d, ring_t], 1)
-        x = x + self.type_emb(kinds) + self.ring_emb(ring)
+        # Embedding lookups written as broadcasts / one-hot matmuls: their backward is a dense reduction. An
+        # nn.Embedding / fancy-index backward accumulates a huge number of indices into very few rows, which is
+        # extremely slow on GPUs (it made backward ~45x slower than forward).
+        tw = self.type_emb.weight
+        types = torch.cat([tw[0].expand(B, 1, -1), tw[1].expand(B, D, -1), tw[2].expand(B, M, -1)], 1)
+        x = x + types + F.one_hot(ring, M + 1).to(x.dtype) @ self.ring_emb.weight.to(x.dtype)
         return self.emb_drop(self.emb_ln(x)), ring
 
     def _bias(self, mb: MaskedBatch, ring: torch.Tensor) -> list[torch.Tensor]:
@@ -172,9 +176,14 @@ class F1Bert(nn.Module):
         # driver-driver edges
         e_in = torch.cat([mb.edge_x * mb.edge_vis, mb.edge_vis.float(), mb.edge_exists[..., None].float()], -1)
         e_h = self.edge_mlp(e_in)  # [B, D, D, eh]
+        # [B, T, T, K] one-hot @ [K, L*H]: one dense matmul for every layer (no gather over B*T*T indices)
+        dt = torch.bfloat16 if torch.is_autocast_enabled() else torch.float32
+        n_buckets, n_layers, n_heads = N_DIST_BUCKETS + 2, self.cfg.layers, self.cfg.heads
+        table = self.dist_bias.permute(1, 0, 2).reshape(n_buckets, n_layers * n_heads).to(dt)
+        dist_all = F.one_hot(bucket, n_buckets).to(dt) @ table  # [B, T, T, L*H]
         out = []
-        for layer_idx in range(self.cfg.layers):
-            b = self.dist_bias[layer_idx][bucket].permute(0, 3, 1, 2)  # [B, H, T, T]
+        for layer_idx in range(n_layers):
+            b = dist_all[..., layer_idx * n_heads : (layer_idx + 1) * n_heads].permute(0, 3, 1, 2)  # [B, H, T, T]
             eb = self.edge_to_bias[layer_idx](e_h).permute(0, 3, 1, 2)  # [B, H, D, D]
             eb = F.pad(eb, (1, M, 1, M))  # place on the driver block
             out.append(b + eb + pad)
