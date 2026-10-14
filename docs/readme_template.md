@@ -866,7 +866,12 @@ To test the integrity of the dataset use this helper function:
 python /home/todortoth/F1/F1/tests/test_dataset.py /home/todortoth/F1/F1/parquet_datasets/2019_round_1.ds/sequence_lap1-58/ --out-gif "/home/todortoth/F1/F1/graphs/test.gif"
 ```
 
-It generates a gif from the pulled dataset to visualize whether the dataset is functional or not.
+It generates a gif from the pulled dataset to visualize whether the dataset is functional or not. For additional info before training,
+a benchmarking script is available:
+
+```bash
+python -m f1strategy.pretrain.bench --cache cache --batch-size 64 --amp --profile
+```
 
 `src/f1strategy/pretrain/` pre-trains a graph-aware BERT encoder on the Parquet datasets written by `main.py --continuous`.
 There are **no labels and no fine-tuning** here: the output is an encoder checkpoint that fine-tuning (undercut / overcut,
