@@ -101,7 +101,7 @@ STRATEGY_GROUPS = {
     "compound": COMPOUND_COLS,
     "tyre": ["tyre_age", "stint", "pit_stops", "fresh_tyre"],
     "pace": ["pace_last3_s", "last_lap_time_s"],
-    "gaps": ["gap_to_leader_s", "gap_ahead_s", "gap_behind_s", "position"], # "official_position"],
+    "gaps": ["gap_to_leader_s", "gap_ahead_s", "gap_behind_s", "position"],  # "official_position"],
 }
 
 # ----------------------------------------------------------------------------------------------- edge leaks

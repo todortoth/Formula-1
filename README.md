@@ -4,7 +4,6 @@
 ![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue)
 ![Code style](https://img.shields.io/badge/code%20style-ruff-261230)
 
-
 Models Formula 1 races as **graphs** and pre-trains a transformer on them. The project has three layers that build on
 each other:
 
@@ -129,7 +128,6 @@ from the lists in `pretrain/schema.py`.
   normalisation, track pooling to fit a 512-token limit, token-type / position ids.
 - **Degrades gracefully** when FastF1 lacks circuit info, sector times, DRS data, weather or race-control messages.
 
-
 ## Installation
 
 Requires Python 3.10 or newer. PyTorch (>= 2.7.1) is a declared dependency because the pre-training package imports it.
@@ -171,7 +169,6 @@ line, saves a plot (`graphs/graph_sector2.png`) and the model arrays (`graphs/gr
 With `--continuous` it additionally writes a Parquet dataset `graphs/sequence_lap44-46/` (or an `.npz` with
 `--format npz`) and `graphs/sequence_lap44-46.gif` (see [Continuous data and animation](#continuous-data-and-animation)). All options are listed in the
 [command line reference](#command-line-reference).
-
 
 ### Python
 
