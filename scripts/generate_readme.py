@@ -154,7 +154,10 @@ CLI = {
         "Lap whose sector crossings define the sector snapshots (taken when the **leader** crosses the sector line).",
     ),
     "--sectors": ("all three", 'Any of `"Sector 1"` `"Sector 2"` `"Sector 3"`.'),
-    "--out-dir": ("`graphs`", "Where PNGs and `.npz` files go."),
+    "--out-dir": (
+        "`graphs`",
+        "Where PNGs and `.npz` files go; in continuous mode also the dataset and GIF (`sequence_lap<from>-<to>`).",
+    ),
     "--spacing": ("10", "Track node spacing in metres."),
     "--max-tokens": ("512", "Token budget used to choose the track pooling factor."),
     "--drs-detection-offset": ("none", "Estimate DRS detection points as *zone start minus this many metres*."),
@@ -164,7 +167,10 @@ CLI = {
         "**Continuous mode**: also sample the race graph densely over a lap window, save it and render a GIF.",
     ),
     "--from-lap": ("`--lap`", "First lap of the continuous window (starts when the leader starts it)."),
-    "--to-lap": ("`--from-lap`", "Last lap of the window (ends when the leader completes it)."),
+    "--to-lap": (
+        "`--from-lap`",
+        "Last lap of the window (ends when the leader completes it); above the session's last lap it is clamped, so `99` means the whole race.",
+    ),
     "--step": ("1.0", "Seconds between two frames (or give `--hz`)."),
     "--hz": (
         "none",

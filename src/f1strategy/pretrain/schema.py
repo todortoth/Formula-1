@@ -35,10 +35,10 @@ DRIVER_FEATURES = [
     "x_m", "y_m", "z_m", "speed_kmh", "vx_mps", "vy_mps", "heading_sin", "heading_cos",
     "heading_rel_track_sin", "heading_rel_track_cos", "throttle", "brake", "gear", "rpm",
     "drs_open", "drs_eligible", "track_s_m", "lap_fraction", "lap_fraction_sin", "lap_fraction_cos",
-    "lateral_offset_m", "progress_m", "lap_number", "position", "official_position",
+    "lateral_offset_m", "progress_m", "lap_number", "position", # "official_position",
     "gap_to_leader_s", "gap_ahead_s", "gap_behind_s", "tyre_age", "fresh_tyre", "stint", "pit_stops",
-    "in_pit", "on_track", "pos_age_s", "car_age_s", "pace_last3_s", "last_lap_time_s",
-    "finished_or_retired",
+    "in_pit", "on_track", # "pos_age_s", "car_age_s",
+    "pace_last3_s", "last_lap_time_s","finished_or_retired",
 ] + COMPOUND_COLS  # fmt: skip
 GLOBAL_FEATURES = [
     "time_s", "leader_lap", "laps_remaining", "race_fraction", "is_green", "is_yellow", "is_sc", "is_vsc",
@@ -101,7 +101,7 @@ STRATEGY_GROUPS = {
     "compound": COMPOUND_COLS,
     "tyre": ["tyre_age", "stint", "pit_stops", "fresh_tyre"],
     "pace": ["pace_last3_s", "last_lap_time_s"],
-    "gaps": ["gap_to_leader_s", "gap_ahead_s", "gap_behind_s", "position", "official_position"],
+    "gaps": ["gap_to_leader_s", "gap_ahead_s", "gap_behind_s", "position"], # "official_position"],
 }
 
 # ----------------------------------------------------------------------------------------------- edge leaks
@@ -178,10 +178,10 @@ def driver_spec(rn: RaceNorm):
         "speed_kmh": (0, 350, 0), "vx_mps": (0, 100, 0), "vy_mps": (0, 100, 0),
         "throttle": (0, 100, 0), "gear": (0, 8, 0), "rpm": (0, 13000, 0),
         "track_s_m": (0, L, 0), "lateral_offset_m": (0, 10, 0), "progress_m": (0, R, 0),
-        "lap_number": (0, 70, 0), "position": (0, 20, 0), "official_position": (0, 20, 0),
+        "lap_number": (0, 70, 0), "position": (0, 20, 0), # "official_position",
         "gap_to_leader_s": (0, 2, 10), "gap_ahead_s": (0, 2, 10), "gap_behind_s": (0, 2, 10),
         "tyre_age": (0, 40, 0), "stint": (0, 4, 0), "pit_stops": (0, 3, 0),
-        "pos_age_s": (0, 0.5, 0), "car_age_s": (0, 0.5, 0),
+        # "pos_age_s", "car_age_s",
         "pace_last3_s": (rn.pace_ref_s, 3, 0), "last_lap_time_s": (rn.pace_ref_s, 10, 0),
     })  # fmt: skip
 
