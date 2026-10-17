@@ -14,7 +14,9 @@ each other:
    for every race from 2019 to 2025 (152 scheduled rounds).
 3. **Self-supervised pre-training.** A graph-aware BERT-style encoder (~5 M parameters) is pre-trained on that corpus
    with four masked-reconstruction tasks (telemetry, ghost car, flags, strategy state). There are no labels yet: the
-   output is an encoder checkpoint that later fine-tuning (undercut / overcut, pit window, ...) can start from.
+   output is an encoder checkpoint that later fine-tuning (undercut / overcut, pit window, ...) can start from. A second, **temporal** model
+   (`f1strategy.seqbert`) runs attention over *time*: one token per graph of a sequence of 10 s, 1 lap or 10 laps, pre-trained with
+   ghost-car, tyre-set, pit-return-window and zone-masking tasks.
 
 The long-term goal is to analyse races and find optimal strategic decisions; this repository is the data and
 representation-learning foundation for that.
@@ -57,6 +59,22 @@ representation-learning foundation for that.
   - [Results of the first run](#results-of-the-first-run)
   - [Using the checkpoint](#using-the-checkpoint)
   - [Pre-training limitations](#pre-training-limitations)
+- **Stage 5 - temporal (sequence) pre-training**
+  - [Temporal (sequence) pre-training](#temporal-sequence-pre-training)
+  - [From snapshots to sequences](#from-snapshots-to-sequences)
+  - [The three sequence scales](#the-three-sequence-scales)
+  - [Windows and the validation split](#windows-and-the-validation-split)
+  - [Step I: graph to vector](#step-i-graph-to-vector)
+  - [The temporal BERT](#the-temporal-bert)
+  - [The temporal pretext tasks](#the-temporal-pretext-tasks)
+  - [Temporal leakage controls](#temporal-leakage-controls)
+  - [Losses and metrics](#losses-and-metrics)
+  - [Contrastive objective](#contrastive-objective)
+  - [Training the temporal model](#training-the-temporal-model)
+  - [Measured cost and the benchmark](#measured-cost-and-the-benchmark)
+  - [Figures for reports](#figures-for-reports)
+  - [Using a temporal checkpoint](#using-a-temporal-checkpoint)
+  - [Status and limitations of the temporal model](#status-and-limitations-of-the-temporal-model)
 - [Limitations and caveats](#limitations-and-caveats)
 - [Testing and continuous integration](#testing-and-continuous-integration)
 - [Project structure](#project-structure)
@@ -77,21 +95,21 @@ flowchart LR
     S1 --> PQ[("parquet_datasets/<br/>YEAR_round_NN.ds<br/>per-race Parquet")]
     PQ --> C["3 - cache.py<br/>stride 5 (2 Hz), normalise,<br/>pool track to 128 tokens"]
     C --> NPY[("cache/YEAR_round_NN<br/>memory-mapped .npy")]
-    NPY --> T["4 - train.py<br/>mask, encode, reconstruct"]
-    T --> CK[("runs/pre1<br/>best.pt, last.pt,<br/>log.jsonl")]
+    NPY --> Q["4 - seqbert.train<br/>windows of T graphs,<br/>graph to vector, attention over time"]
+    Q --> QK[("runs/seq_short<br/>ckpt.pt, log.jsonl")]
     SC["2 - scrape.sh<br/>all races 2019-2025"] -.->|"runs stage 1 per race"| S1
 ```
 
-| Stage | Entry point | Reads | Writes | Measured size / cost |
-|---|---|---|---|---|
-| **1. Session to frames** | `python main.py --continuous --hz 10 ...` (`SessionAnalyser`, `SequenceBuilder`, `ParquetSequenceWriter`) | a FastF1 session (laps, position and car data, track status, race control, weather) | `<out-dir>/sequence_lap<a>-<b>/` Parquet dataset: `manifest.json`, `track.parquet`, `drivers/`, `global/`, `edges/` | 2019 Australian GP: 51,276 frames (10 Hz, 5,128 s), 26 chunks, 104.5 MB on disk (zstd) |
-| **2. Corpus** | `scripts/scrape.sh` -> `scripts/scrape_data.sh <year>` | the 2019-2025 calendars | `parquet_datasets/<year>_round_<NN>.ds/sequence_lap1-<N>/` per race, logs in `scraping_logs/` | 7 parallel workers, one per season; 152 rounds scheduled, Belgium 2021 fails (see [corpus](#building-the-corpus-bulk-scraping)) |
-| **3. Training cache** | `python -m f1strategy.pretrain.cache` | the Parquet datasets | `cache/<year>_round_<NN>/` with `meta.json` and `.npy` memory maps | stride 5 -> ~10 k frames and ~118 MB per race (2019 Australian GP: 10,256 frames) |
-| **4. Pre-training** | `python -m f1strategy.pretrain.train` | the caches | `runs/<name>/best.pt`, `last.pt`, `log.jsonl`, `args.json` | `small` preset: 5.04 M parameters, ~1 s/step at batch 64 on one CUDA GPU |
-| **5. Inspection** | `tests/test_dataset.py`, `tests/visualize_training.py`, `python -m f1strategy.pretrain.bench` | a dataset / `train.log` / a cache | verification GIF, loss plot, per-step timing | - |
+| Stage                        | Entry point | Reads | Writes | Measured size / cost |
+|------------------------------|---|---|---|---|
+| **1. Session to frames**     | `python main.py --continuous --hz 10 ...` (`SessionAnalyser`, `SequenceBuilder`, `ParquetSequenceWriter`) | a FastF1 session (laps, position and car data, track status, race control, weather) | `<out-dir>/sequence_lap<a>-<b>/` Parquet dataset: `manifest.json`, `track.parquet`, `drivers/`, `global/`, `edges/` | 2019 Australian GP: 51,276 frames (10 Hz, 5,128 s), 26 chunks, 104.5 MB on disk (zstd) |
+| **2. Corpus**                | `scripts/scrape.sh` -> `scripts/scrape_data.sh <year>` | the 2019-2025 calendars | `parquet_datasets/<year>_round_<NN>.ds/sequence_lap1-<N>/` per race, logs in `scraping_logs/` | 7 parallel workers, one per season; 152 rounds scheduled, Belgium 2021 fails (see [corpus](#building-the-corpus-bulk-scraping)) |
+| **3. Training cache**        | `python -m f1strategy.pretrain.cache` | the Parquet datasets | `cache/<year>_round_<NN>/` with `meta.json` and `.npy` memory maps | stride 5 -> ~10 k frames and ~118 MB per race (2019 Australian GP: 10,256 frames) |
+| **4. Temporal pre-training** | `python -m f1strategy.seqbert.train` | the caches (windows of 10 s / 1 lap / 10 laps) | `runs/<name>/ckpt.pt`, `log.jsonl`, `args.json` | `small` preset: 5.8-8.3 M parameters depending on the graph encoder; cost: see [measured cost](#measured-cost-and-the-benchmark) |
+| **5. Inspection**            | `tests/test_dataset.py`, `tests/visualize_training.py`, `python -m f1strategy.pretrain.bench`, `python -m f1strategy.seqbert.bench`, `python -m f1strategy.seqbert.visualize` | a dataset / `train.log` / a cache | verification GIF, loss plot, per-step timing, report figures | - |
 
 Each stage only depends on the files written by the previous one, so any stage can be re-run on its own. The **schema** is
-the contract between the stages: the feature name lists (45 driver, 23 global, 7 edge, 18 static track features, 6 flag
+the contract between the stages: the feature name lists (42 driver in the training schema, 23 global, 7 edge, 18 static track features, 6 flag
 bits) are written into every dataset's `manifest.json`, and the cache builder refuses a dataset whose manifest differs
 from the lists in `pretrain/schema.py`.
 
@@ -119,9 +137,10 @@ from the lists in `pretrain/schema.py`.
   with masked values stored as real nulls; query it lazily with Polars or read any frame range back into a `RaceSequence`.
 - **A full-season corpus.** One command per season scrapes every race of 2019-2025 at 10 Hz into Parquet, resumable and
   logged per season.
-- **Self-supervised graph BERT.** A permutation-equivariant encoder over `[GLOBAL] + 22 driver slots + 128 track tokens`,
-  with the graph structure (ring distance, proximity edges) as a learned attention bias, pre-trained with four
-  leakage-controlled masking tasks; whole-race validation hold-out, physical-unit metrics next to baselines.
+- **Temporal graph BERT.** A second model (`f1strategy.seqbert`) turns every graph of a sequence into one vector (GNN, flatten or
+  sector pooling) and runs a bidirectional `nn.TransformerEncoder` over *time*, on windows of 10 s, 1 lap or 10 laps. Pre-trained
+  with ghost-car, tyre-set, pit-return-window and zone masking plus an optional contrastive objective; benchmark script and
+  report figures included.
 - **Animated GIF** of the same arrays (flag-coloured track, cars with trails, leaderboard, flag banner), next to the
   original point-by-point graphs and PNGs, which are unchanged.
 - **Model-ready export.** Fixed, named feature schema (one-hot, sin/cos, zero-filled with masks), optional
@@ -221,8 +240,12 @@ scripts/scrape.sh                                  # edit the venv path inside f
 # 3) Parquet -> memory-mappable caches (2 Hz, normalised, track pooled to 128 tokens)
 python -m f1strategy.pretrain.cache --src parquet_datasets --dst cache --stride 5
 
-# 4) pre-train (writes runs/pre1/best.pt, last.pt, log.jsonl, args.json)
+# 4) pre-train on single snapshots (writes runs/pre1/best.pt, last.pt, log.jsonl, args.json)
 python -m f1strategy.pretrain.train --cache cache --out runs/pre1 --preset small --batch-size 64 --amp --workers 8
+
+# 5) pre-train on sequences of graphs (temporal model; one scale per run: short = 10 s, medium = 1 lap, long = 10 laps)
+python -m f1strategy.seqbert.bench --cache cache --batch-sizes 2 4 8           # what does this machine carry?
+python -m f1strategy.seqbert.train --cache cache --out runs/seq_short --scale short --graph-encoder flatten --amp
 ```
 
 A single race is enough to try the whole chain: `python main.py --year 2025 --event 5 --continuous --hz 10 --from-lap 1
@@ -691,30 +714,7 @@ drivers). `token_layout()` returns `token_type_ids` (0 global, 1 driver, 2 track
 
 The three token types have different feature widths, so the model needs one linear projection per type plus a
 token-type embedding, then feeds `inputs_embeds` to the encoder. A sketch (not part of the package and not run in this
-repository's tests - adapt it freely):
-
-```python
-import torch
-import torch.nn as nn
-from transformers import BertConfig, BertModel
-
-
-class RaceGraphEncoder(nn.Module):
-    def __init__(self, n_global, n_driver, n_track, hidden=256):
-        super().__init__()
-        cfg = BertConfig(hidden_size=hidden, num_hidden_layers=4, num_attention_heads=4,
-                         intermediate_size=4 * hidden, max_position_embeddings=512, type_vocab_size=3)
-        self.bert = BertModel(cfg, add_pooling_layer=False)
-        self.proj = nn.ModuleList([nn.Linear(n_global, hidden), nn.Linear(n_driver, hidden), nn.Linear(n_track, hidden)])
-
-    def forward(self, g, d, t, token_type_ids, position_ids):          # g [B,1,Fg]  d [B,D,Fd]  t [B,N,Ft]
-        x = torch.cat([self.proj[0](g), self.proj[1](d), self.proj[2](t)], dim=1)
-        return self.bert(inputs_embeds=x, token_type_ids=token_type_ids, position_ids=position_ids).last_hidden_state
-```
-
-This sketch is only an illustration. The encoder that is actually trained in this repository is `f1strategy.pretrain.model.F1Bert`
-(see [Model](#model)): it uses a fixed 128-token track instead of the 512-token budget above, and encodes the ring / driver-to-track
-structure as a learned attention bias.
+repository's tests - adapt it freely)
 
 ## Command line reference
 
@@ -790,17 +790,10 @@ in the [layout above](#parquet-datasets-polars): about 100 MB on disk per race (
 
 - **Belgian GP 2021 (round 12)** fails with `ValueError: No usable lap to derive the track outline from.`: the race
   produced no clean timed lap to rebuild the track from, so there is nothing to export.
-- The supplied cache holds 150 races although 151 rounds should export; the logs do not say which other round is missing.
-  The cache builder skips (and prints) any dataset whose schema check or size limits fail.
 - FastF1 prints `Position data is incomplete!` for various drivers (e.g. numbers 241-243, which are not race cars) and
   `Lap timing integrity check failed` warnings; they are warnings of the source data, not errors of this pipeline.
   Debug lines such as `Failed to parse timedelta string '1 L'` (lapped cars' gap strings) in the 2023 log are likewise
   harmless: the round still completed.
-- **The current `scrape_data.sh` stops a season at the first failing round.** The logs in `scraping_logs/` were written by
-  an earlier version that printed "Skipping to next round due to data error" and carried on, which is why 2021 rounds
-  13-22 appear there. With the current script, 2021 stops after round 11 because of round 12; run the later rounds by hand
-  (`python main.py --year 2021 --event 13 ...` as above) or change the `break` into `continue` for rounds below the
-  season's last.
 
 **Monitoring.**
 
@@ -842,7 +835,7 @@ Files per race (T frames after decimation, D = 22, M = 128):
 | File | Shape / dtype | Content |
 |---|---|---|
 | `meta.json` | - | race constants, stride, driver codes, normalisation constants, `t_start` / `t_stop`, source path |
-| `drv.npy` | `[T, D, 45]` float32 | normalised driver features (NaN = missing) |
+| `drv.npy` | `[T, D, 42]` float32 | normalised driver features (NaN = missing) |
 | `drv_tok.npy` | `[T, D]` int16 | track token under each car (-1 unknown) |
 | `present.npy` | `[T, D]` bool | the car exists in this frame |
 | `glb.npy` | `[T, 23]` float32 | normalised global features |
@@ -856,6 +849,11 @@ The 2019 Australian GP becomes 10,256 frames (0.5 s apart) and ~118 MB (`edge.np
 of all 150 races is therefore in the order of 15-20 GB. A cache that already has a `meta.json` is skipped unless
 `--overwrite` is given, and a race that fails is reported as `SKIPPED (...)` without stopping the bulk build.
 
+> **Excluded columns.** The training schema (`pretrain/schema.py`) lists **42** driver features: `official_position`, `pos_age_s`
+> and `car_age_s` are commented out because they are treated as data leaks for the pretext tasks, and the dataset manifests were edited accordingly. `check_manifest` is strict, so a manifest that still lists
+> those three columns is rejected. Stage 1 and its tables above still describe the full exporter output (45 driver features);
+> everything from the training cache on (both pre-training models) works with the 42 features.
+
 ## Self-supervised pre-training
 
 `src/f1strategy/pretrain/` pre-trains a graph-aware BERT encoder on the caches. There are **no labels and no fine-tuning**
@@ -865,7 +863,7 @@ here: the output is an encoder checkpoint that fine-tuning can start from later.
 python -m f1strategy.pretrain.train --cache cache --out runs/pre1 --preset small --batch-size 64 --amp --workers 8
 ```
 
-The settings of the first full run (35,000 steps, resumed once from the step-15,000 checkpoint; `runs/pre1/args.json`):
+The settings of the first full run (35,000 steps, resumed once from the step-15,000 checkpoint; `runs/pre1/args.json`; outdated and not correctly implemented):
 
 ```bash
 python -m f1strategy.pretrain.train --cache cache --out runs/pre1 --preset small --steps 35000 --batch-size 64 \
@@ -897,7 +895,7 @@ A=1,B=1,C=0.1,D=1`.
 **Long runs.** Keep the process alive after logging out and raise the open-file limit (the memory maps of ~150 races):
 
 ```bash
-nohup bash -c "source .venv/bin/activate && ulimit -n 65536 && python -m f1strategy.pretrain.train --cache cache --out runs/pre1 --preset small --batch-size 64 --amp --workers 8" > train.log 2>&1 &
+nohup bash -c "source .venv/bin/activate && ulimit -n 65536 && python -m f1strategy.pretrain.train --cache cache --out runs/pre1 --preset small --batch-size 64 --amp --workers 8" > runs/logs/train_pre1.log 2>&1 &
 ps aux | grep f1strategy
 python tests/visualize_training.py        # parses train.log, writes runs/bert_pretraining_metrics.png
 ```
@@ -905,15 +903,21 @@ python tests/visualize_training.py        # parses train.log, writes runs/bert_p
 **Benchmark** (time of one step split into mask / forward / backward, with optional op profile and peak GPU memory):
 
 ```bash
+# Outdated:
 python -m f1strategy.pretrain.bench --cache cache --batch-size 64 --amp --profile
+# Current:
+python -m f1strategy.seqbert.bench --cache cache --batch-sizes 2 4 8
+python -m f1strategy.seqbert.bench --cache cache --batch-sizes 2 4 8 --amp --probe --scales long --encoders gnn
 ```
 
 ## Model
 
+The following section is outdated, see [Temporal (sequence) pre-training](#temporal-sequence-pre-training)
+
 One token per snapshot element: `[GLOBAL] + 22 driver slots + 128 track tokens` (151 tokens; the 10 m ring is pooled to a fixed
 128 tokens whatever the circuit, so a token is a fixed *fraction of the lap* and circuits share one position vocabulary).
 
-* **Separate input projections** for global (2 x 23 inputs), driver (2 x 45) and track tokens (18 static features, 6 flag
+* **Separate input projections** for global (2 x 23 inputs), driver (2 x 42) and track tokens (18 static features, 6 flag
   bits and their visibility, car count), a token-type embedding, and a **ring-position embedding shared by cars and track**:
   a car gets the embedding of the track token it is on. A learnable "unknown position" is used when a car's location is
   hidden, and a learnable ghost embedding marks the masked car in the ghost-car task.
@@ -924,7 +928,7 @@ One token per snapshot element: `[GLOBAL] + 22 driver slots + 128 track tokens` 
   unknown positions), and the proximity-edge features of every car pair through a small MLP and one linear map per layer.
   Absent cars are masked as attention keys.
 * **Inputs are `[value * visible, visible]`**, never a silently zeroed value; missing data (Parquet nulls) is "not visible".
-* **Heads (pre-training only, discarded afterwards):** a driver head (all 45 driver features, compound as 6 logits), a flag
+* **Heads (pre-training):** a driver head (all 42 driver features, compound as 6 logits), a flag
   head (yellow / double yellow per track token) and a global head (all 23 global features). `F1Bert.encode` returns the hidden
   states `[B, 151, hidden]` that fine-tuning would use.
 * Embedding lookups and the distance bias are written as broadcasts and one-hot matmuls: their backward pass is a dense
@@ -1037,8 +1041,8 @@ How to read it, honestly:
 ```python
 from f1strategy.pretrain.model import load_encoder
 
-enc = load_encoder("runs/pre1/best.pt", device="cpu")     # rebuilds F1Bert from the stored config
-enc.encode(masked_batch)                                  # hidden states [B, 151, hidden]
+enc = load_encoder("runs/pre1/best.pt", device="cpu")  # rebuilds F1Bert from the stored config
+enc.encode(masked_batch)  # hidden states [B, 151, hidden]
 ```
 
 `encode` takes a `MaskedBatch` (see `pretrain/masking.py`). There is no helper yet that builds one with *everything visible*
@@ -1048,7 +1052,7 @@ for plain inference or fine-tuning; writing it (a `Masker` pass that hides nothi
 ## Pre-training limitations
 
 * No fine-tuning, no downstream heads or labels yet.
-* **Single snapshots only**: no temporal context across frames. Stacking a window of snapshots is the natural next step, and
+* **Single snapshots only** (this model; the [temporal model](#temporal-sequence-pre-training) addresses it): no temporal context across frames. Stacking a window of snapshots is the natural next step, and
   the data (10 Hz Parquet, `RaceSequence.windows`) already supports it.
 * Driver identity / team is not an input (slots are arbitrary per race), so the encoder cannot learn driver-specific behaviour yet.
 * Task C needs flag events in the training data; a race with no SC/VSC contributes only yellow-sector signal, and the results
@@ -1056,6 +1060,376 @@ for plain inference or fine-tuning; writing it (a `Masker` pass that hides nothi
 * The cache keeps 2 Hz; 10 Hz is interpolated and redundant for these tasks, but short transients (a lock-up, a flag lasting a
   few seconds) can fall between kept frames.
 * Validation uses 512 frames of 15 races and one seed; use `--eval-frames 2048` or more before drawing fine conclusions.
+
+## Temporal (sequence) pre-training
+
+`src/f1strategy/seqbert/` is the second pre-training model. The first one ([above](#self-supervised-pre-training)) encodes
+**one snapshot**: its tokens are the nodes of one graph, so attention runs over *space* and the model never sees how a race
+moves. The temporal model turns each snapshot into **one vector** and runs a standard BERT encoder over a *sequence of such
+vectors*, so attention runs over **time**. It reuses the schema, the caches and `RaceCache` of the first model unchanged; the
+first model stays available for reproducing its results.
+
+<p align="center">
+  <img src="docs/images/fig1_architecture.png" alt="Pipeline of the temporal model: sequence of graphs, graph to vector, temporal BERT encoder, heads" width="900"><br>
+  <em>The temporal pipeline (generated by <code>seqbert.visualize</code>). 0: a window of T graphs. I: every graph is turned into
+  one vector (GNN, flatten or sector). II: <code>[CLS]</code> + T vectors go through a bidirectional <code>nn.TransformerEncoder</code>
+  with learned time positions; in task Z a block of vectors is replaced by a dummy vector first. III: a 1-layer linear head
+  reconstructs the flattened frame at every time step, and <code>[CLS]</code> feeds the contrastive loss.</em>
+</p>
+
+```mermaid
+flowchart LR
+    NPY[("cache/YEAR_round_NN")] --> W["WindowIndex<br/>T graphs, step from lap time"]
+    W --> M["SeqMasker<br/>B ghost - T tyres - P pit window - Z zone"]
+    M --> G["graph encoder (per frame)<br/>flatten / sector / gnn"]
+    G --> V["T vectors + CLS<br/>Z: block -> dummy vector"]
+    V --> TF["nn.TransformerEncoder<br/>attention over time"]
+    TF --> H1["1-layer head<br/>flattened frame, MSE / cosine"]
+    TF --> H2["CLS -> projection<br/>contrastive loss"]
+```
+
+### From snapshots to sequences
+
+| | Snapshot model (`pretrain`) | Temporal model (`seqbert`) |
+|---|---|---|
+| Token | a graph element: `[GLOBAL]`, a driver slot, a track token (151 per snapshot) | one whole graph (one time step), plus `[CLS]` |
+| Attention over | the graph (ring distance and proximity edges as bias) | time (learned absolute time positions) |
+| Graph handling | inside the transformer | in a separate *graph encoder* that returns one vector per frame |
+| Input | one frame | T consecutive frames (10 s, 1 lap or 10 laps) |
+| Tasks | A telemetry cells, B ghost car, C flags, D strategy cells | B ghost car, T tyre set, P pit-return window, Z zone, K contrastive |
+| Head | task-specific MLPs | one linear layer on the flattened frame (+ a projection head for K) |
+| Permutation-equivariant over cars | yes | no: the vector keeps every car in its slot (needed by the linear head) |
+
+The encoder is the PyTorch `nn.TransformerEncoder` (BERT-style: bidirectional, GELU, learned absolute positions, a `[CLS]`
+summary token); `transformers` is not required.
+
+### The three sequence scales
+
+A window is defined in physical time so that the same code serves every circuit (`seqbert/config.py`). The number of tokens
+is fixed per scale, so batches stack; the time between two tokens is derived from the race's median representative lap
+time (`pace_ref_s` in `meta.json`) and rounded to a whole number of cache frames (the cache is 2 Hz, 0.5 s per frame).
+
+| Scale | Window | Tokens | Cache frames per token | Time per token | Example (Melbourne 2019, lap ~90 s) |
+|---|---|---|---|---|---|
+| `short` | 10 s | 20 | 1 | 0.5 s | 20 frames = 10 s |
+| `medium` | 1 lap | 96 | `round(lap / 96 / 0.5 s)` = 2 | ~1 s | 191 frames = 95.5 s |
+| `long` | 10 laps | 192 | `round(10 lap / 192 / 0.5 s)` = 9 | ~4.5 s | 1,720 frames = 860 s |
+
+<p align="center">
+  <img src="docs/images/fig4_scales.png" alt="The three window scales on the same race" width="760"><br>
+  <em>The three scales on the 2019 Australian GP: the blue band is one window, the blue ticks are its tokens (mean field speed
+  in grey).</em>
+</p>
+
+Because the rounding is to whole frames the realised window is slightly different from the nominal one (95.5 s instead of 90 s
+for one lap here). The token counts are a trade-off between temporal resolution and memory: the graph encoder processes
+`batch x tokens` frames per step and the transformer adds a `T x T` attention per sample, so the long scale is the one to
+size carefully (see [measured cost](#measured-cost-and-the-benchmark)). Override a scale with `--n-tokens`, `--span-s` or
+`--span-laps`; one scale is trained per run (`--scale`). The model has a learned *scale embedding* so that one network could
+later be trained on mixed scales, but the training script does not do that yet.
+
+### Windows and the validation split
+
+* **`WindowIndex`** lists every window `(race, first frame, frame step)` of a scale. Windows start every quarter of their span
+  (`hop_frac = 0.25`, i.e. 75 % overlap) and a window is kept only if at least 90 % of the frames in its span are usable
+  (finite time, at least two cars). Unusable frames inside a kept window are not dropped: they are padding keys in the
+  transformer's attention mask.
+* **Sampling:** windows that contain a flagged frame (yellow, SC, VSC, red) get weight 3 in the `WeightedRandomSampler`.
+* **No leakage between train and validation.** Windows overlap heavily, so a random split would put near-identical windows on
+  both sides. With >= 5 races whole races are held out (`--val-frac`, seeded). With fewer races each race is cut into blocks of
+  `max(--block-s, 2 x window span)`; every k-th block (k = round(1 / `--val-frac`), reduced when the race has fewer blocks) is
+  validation. A window is validation only if it lies completely inside a validation block, and training only if it touches no
+  validation block at all; windows straddling a boundary are dropped, so the embargo is the whole window.
+* Tensors of a window (all `[T, ...]`): `drv` (22 x 42), `tok`, `present`, `glb`, `ysec`, `dsec`, `edge` (22 x 22 x 7),
+  `eexists`, plus the race's pooled `track` (128 x 18) and `track_marshal` once, and `ok` (usable frame) and `t`.
+
+### Step I: graph to vector
+
+Three interchangeable encoders implement the "Graph to vector" box (`--graph-encoder`); each maps one masked frame to a vector
+of size `hidden`. Hidden values enter as `[value * visible, visible]`, never as a silent zero, and absent cars are all-zero.
+
+<p align="center">
+  <img src="docs/images/fig2_graph_to_vector.png" alt="One race graph and the three ways to turn it into a vector" width="900"><br>
+  <em>One real frame (2019 Australian GP): (a) the graph, (b) sector pooling, (c) the GNN's nodes and edges, (d) the flattened
+  driver matrix.</em>
+</p>
+
+| Encoder | What it does | Parameters (`small`, whole model) | Notes |
+|---|---|---|---|
+| `flatten` | concatenates the visible numbers of the frame and projects them linearly: drivers (22 x (2 x 42 + 2)), proximity edges (22 x 22 x (2 x 7 + 1)), global (2 x 23), the 128 x 6 flag bits; the circuit (128 x 18 static features) is projected once per sample and added to every frame; LayerNorm | 8.33 M | cheapest, keeps every slot and value exactly; the baseline |
+| `sector` | cuts the lap ring into 16 equal arcs; per arc: mean static track features, flag bits (max), car count, the visible-weighted mean of the features of the cars in the arc and the visible fraction; a shared MLP per arc + arc embedding, arcs concatenated and projected; a global branch adds the global features and which car slots are masked | 5.76 M | most abstract: a car is only seen through its arc; strong on "where is the traffic", weak on a single car's exact values |
+| `gnn` | a graph-attention network (2 pre-LN layers, 4 heads) on `[global] + 22 cars + 32 coarse track nodes`; edges = ring neighbours, car <-> the track node it is on, car <-> car proximity edges (their features become an attention bias per head), global <-> all; absent cars are never attended to; read-out = global node, the 22 car nodes in slot order, mean of the track nodes, then a linear projection | 6.27 M | most expressive, ~3x the time of `flatten` per step on CPU |
+
+All three read cars **slot by slot** (a car keeps its place in the vector). That is deliberate: the head is a single linear
+layer that has to reconstruct "slot 7's features" from the contextualised vector, so the vector must know which slot is which
+and which slots are masked. The price is that, unlike the snapshot model, the temporal model is not permutation-equivariant
+over cars. Slots are alphabetical by driver code within a race, so there is no identity across races.
+
+### The temporal BERT
+
+```
+frames (T graphs) -> graph encoder -> T vectors [B, T, H]
+   task Z: the masked block of vectors is replaced by the dummy vector (-0.1 / +0.1 alternating over the H dims, or zeros)
+[CLS] + vectors -> + learned time position (T + 1) + learned scale embedding -> LayerNorm -> dropout
+   -> nn.TransformerEncoder (pre-LN, GELU, batch_first, key-padding mask for unusable frames) -> final LayerNorm
+   -> tokens [B, T, H]  (index 0 = [CLS])
+1-layer head:  Linear(H -> 1155) = drivers 22 x 42 | global 23 | track 2 x 40 marshal-sector flags + 128 cars-per-token
+projection head (contrastive):  [CLS] -> Linear -> GELU -> Linear(64)
+```
+
+| Preset | hidden | layers | heads | FFN | GNN width | Whole model, `flatten` encoder |
+|---|---|---|---|---|---|---|
+| `tiny` | 128 | 2 | 4 | 512 | 64 | 2.2 M (smoke tests / CPU) |
+| `small` | 256 | 6 | 8 | 1024 | 128 | 8.3 M |
+| `base` | 384 | 8 | 8 | 1536 | 128 | not measured |
+
+The dummy vector is added *before* the time positions, so a masked step still knows where in the window it sits. The Z-masked
+steps' vectors do not depend on anything in the masked frames (the graph encoder's output is thrown away), which is tested.
+The graph encoder still runs on the masked frames (their output is discarded); skipping them is an easy saving that has not
+been done.
+
+### The temporal pretext tasks
+
+Tasks A (telemetry cells) and C (flags) of the snapshot model are not used here. Every sample of a batch gets exactly one task
+(`--task-probs`, default 25 % each), so each loss and its leak control stay clean.
+
+<p align="center">
+  <img src="docs/images/fig5_task_masks.png" alt="Which cells each temporal pretext task hides" width="760"><br>
+  <em>What each task hides in one real 20-frame window (rows = car slots, columns = time steps; red = hidden, green = the
+  visible reference car of task P). In task P the hidden set moves with the traffic.</em>
+</p>
+
+| | Task | What is hidden | Reconstructed |
+|---|---|---|---|
+| **B** | Ghost car | **all 42 features of one car in every frame** of the window (cars present in > 50 % of the usable frames; one per sample); the car's ring position stays visible in `relational` mode (`--ghost-edge-mode`) | its whole feature vector at every time step |
+| **T** | Tyre set | for one car, in every frame: the compound one-hot (6) and `tyre_age`, `fresh_tyre`, `stint`, `pit_stops`, i.e. "which tyres are on it and how long ago were they fitted" | the same cells (compound by arg-max accuracy, tyre age in laps) |
+| **P** | Pit-return window | for a random reference car X, frame by frame: every car whose true time gap to the leader is **18-24 s larger than X's** (`--pit-window`), i.e. the traffic X would rejoin into after a pit stop (about the pit-lane time loss). X stays visible; the hidden set changes with the cars | all features of the hidden cars: gap to the leader, position, speed, **compound and tyre age** (is the traffic on fresh or worn tyres?) |
+| **Z** | Zone | whole **graph vectors** of one contiguous block, by default the middle 35 % of the window (`--zone-frac`, `--zone-position middle|random`), replaced by the dummy vector (`--mask-fill alt|zero`) after the graph encoder | the flattened frame (drivers, global, marshal-sector flags, cars per token) at every masked step, through the 1-layer head |
+| **K** | Contrastive (optional) | nothing; light random vector dropout (15 %) on both views | `[CLS]` embeddings of two windows of the same circuit and race phase must match, other circuits must not (see [below](#contrastive-objective)) |
+
+How the tasks relate to the strategic questions the model is meant to serve: T forces the model to infer tyre state from pace,
+pit activity and the field around it; P forces it to model *where the field is spread out in time* behind a car, which is
+exactly the question "if I pit now, where do I come out, and on whose tyres?"; Z forces it to interpolate and extrapolate
+the evolution of the whole field across a gap; B forces it to place a missing car from the others' reactions over time.
+
+The task-P reference car is drawn among the cars that have at least one car in the window in some frame of the window (weighted
+by how many frames that is). If no car qualifies (a very spread-out field or a short window), the sample has no target and
+contributes nothing to the loss.
+
+### Temporal leakage controls
+
+The leak maps of the snapshot model carry over (`pretrain/schema.py`), applied per frame and over the whole window; `seqbert`
+adds the rules for a hidden car across time. Everything is enforced in `seqbert/masking.py` and covered by `tests/seqbert/`.
+
+* **Whole-car masks (B, P):** all features of the car are hidden. On every proximity edge touching a hidden car the edge
+  features that restate its speed (`rel_speed_kmh`) and its gaps / position (`gap_s`, `order_neighbor`, `drs_window`) are hidden.
+  `--ghost-edge-mode` (task B, default `relational`) and `--pit-edge-mode` (task P, default `topology`, the harder choice) can
+  hide all edge values (`topology`) or edge existence as well (`none`); in `topology` / `none` the car's ring position is hidden too.
+* **Task P hides one more thing:** `gap_ahead_s` and `gap_behind_s` of **all** cars in every frame that has a hidden car, because
+  the gap of a visible neighbour to a hidden car *is* the hidden car's gap.
+* **Task T** hides exactly the compound one-hot and `tyre_age`, `fresh_tyre`, `stint`, `pit_stops`: `stint` and `pit_stops` would
+  otherwise reveal when the set was fitted.
+* **Task Z** hides complete frames *after* the encoder; a test overwrites the masked frames of the raw input with noise and
+  requires bit-identical output. A second test does the same for a ghost car (in `topology` mode).
+* **Never masked:** track flags and the global status (task C is gone), so they are available context everywhere.
+* **Known soft leak, left in on purpose:** the other cars' `position` values reveal *which rank* is missing in tasks B and P, and
+  the visible gaps bracket a hidden car's gap. That is genuine context rather than a copy; hide `position` of all cars in those
+  frames too if you want the harder variant.
+* **Excluded columns:** `official_position`, `pos_age_s` and `car_age_s` are not in the training schema (see the note under
+  [Training cache](#training-cache)), so none of the tasks can use them.
+* **No partial speed masks any more** (task A is gone), so the old rule "hide `vx`/`vy` with speed" only matters through the
+  whole-car masks.
+
+### Losses and metrics
+
+* **Targets and cells:** the head's output is the flattened frame; each task owns a different set of cells (B: the ghost's
+  features in every frame; T: the tyre cells; P: the hidden cars' cells; Z: every valid cell of the masked frames). The loss of
+  a task is the mean over its own cells; the total is the mean over the tasks present in the batch (there are no per-task
+  weights; use `--task-probs` to change how often each occurs).
+* **`--loss-kind`:** `mse` (default; also used for the binary and compound cells, which is the Brier score for those),
+  `huber` (delta 1) or `cosine` (1 - cosine similarity of the predicted and true masked cells per time step);
+  `--cos-weight` adds the cosine term to `mse` / `huber`.
+* **Validation:** `--eval-windows` validation windows (evenly spaced) are evaluated every `--eval-every` steps with *every*
+  task forced in turn and the same masks each time (a generator seeded per task). Errors are reported in physical units:
+
+| Task | Metrics in the log (`eval` entry) | Baselines in the same entry |
+|---|---|---|
+| B | `B/position_mae`, `B/speed_kmh_mae`, `B/gap_to_leader_s_mae`, `B/tyre_age_mae`, `B/compound_acc`, `B/mse` | `*_mean` (predict the batch mean), `B/compound_majority_acc` |
+| T | `T/tyre_age_mae`, `T/stint_mae`, `T/pit_stops_mae`, `T/compound_acc`, `T/mse` | `*_mean`, `T/compound_majority_acc` |
+| P | `P/gap_to_leader_s_mae` (seconds), `P/position_mae`, `P/speed_kmh_mae`, `P/tyre_age_mae`, `P/compound_acc`, `P/mse` | `*_mean`, `P/compound_majority_acc` |
+| Z | `Z/speed_kmh_mae`, `Z/throttle_mae`, `Z/rpm_mae`, `Z/position_mae`, `Z/tyre_age_mae`, `Z/compound_acc`, `Z/mse` | `*_mean` and **`Z/*_interp`: linear interpolation across the masked block** |
+
+The interpolation baseline is the one to watch: it needs no learning and is hard to beat for smooth quantities, so a zone
+model that does not beat it has not learned dynamics yet. The contrastive steps log `top1`, the in-batch retrieval accuracy of
+the partner window.
+
+### Contrastive objective
+
+An optional extra objective (`--p-contrast`, share of contrastive steps, 0 = off) that teaches `[CLS]` what kind of track and
+which moment of a race a window is from: Monaco (slow) and Monza (fast) must be apart, the start of the same circuit in
+different years must be close.
+
+* **Groups.** `circuit_ids` recognises the same circuit in different years from the pooled curvature profile (correlation
+  >= 0.9 and lap length within 3 %; layouts that changed are a new circuit). A window's *phase* is the race fraction at its
+  centre in `--phase-bins` bins (default 10, i.e. 10 % of the race; the start of a race is bin 0). A (circuit, phase) pair is
+  one group.
+* **Pairs.** `PairBatchSampler` draws `--pairs` groups per batch, preferring different circuits, and two windows per group
+  (from different races, i.e. years, when the group has them). The two windows are the positive pair; all other windows in the
+  batch are negatives.
+* **Loss.** NT-Xent over the 2P `[CLS]` projections (MLP to 64 dims) at `--temperature` 0.1, weighted by `--contrast-weight`.
+  Both views get 15 % random vector dropout.
+* **Caveats.** It is only meaningful with several races and years; on a single race it degenerates to "nearby windows of the
+  same race". A phase bin of 10 % is coarse for the short scale (many different moments share a bin), so for `short` use more
+  bins; for `medium` and `long` a bin is a good "stage of the race".
+
+### Training the temporal model
+
+```bash
+# 1) the cache is the one of the snapshot model (stride 5 = 2 Hz)
+python -m f1strategy.pretrain.cache --src parquet_datasets --dst cache --stride 5
+
+# 2) what can this machine carry? (time per step, parameters; peak GPU memory on CUDA)
+python -m f1strategy.seqbert.bench --cache cache --scales short medium long --encoders flatten sector gnn --batch-sizes 2 4 8 --preset small
+python -m f1strategy.seqbert.bench --cache cache --scales long --encoders sector --probe          # largest batch that fits
+python -m f1strategy.seqbert.bench --cache cache --batch-sizes 2 4 8 --amp --probe --scales long --encoders gnn
+
+# 3) train one scale per run
+python -m f1strategy.seqbert.train --cache cache --out runs/seq_short  --scale short  --graph-encoder flatten --p-contrast 0.1 --amp
+python -m f1strategy.seqbert.train --cache cache --out runs/seq_medium --scale medium --graph-encoder sector  --batch-size 16 --amp
+python -m f1strategy.seqbert.train --cache cache --out runs/seq_long   --scale long   --graph-encoder sector  --batch-size 4  --amp
+
+# 4) figures for a report or a supervisor
+python -m f1strategy.seqbert.visualize --cache cache --out figures
+python .\tests\visualize_training_loss.py --log .\runs\pre2\log.jsonl
+
+# 5) tests
+python -m pytest tests/seqbert
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--cache`, `--out` | required | cache directory and run directory |
+| `--scale` | `short` | `short` / `medium` / `long` (10 s / 1 lap / 10 laps) |
+| `--n-tokens`, `--span-s`, `--span-laps` | scale default | override the number of tokens or the window length |
+| `--graph-encoder` | `flatten` | `flatten` / `sector` / `gnn`, see [Step I](#step-i-graph-to-vector) |
+| `--preset` | `small` | `tiny` / `small` / `base`, see [the temporal BERT](#the-temporal-bert) |
+| `--steps`, `--batch-size` | 2000, 32 / 16 / 8 | optimiser steps; samples per step (default by scale: short / medium / long) |
+| `--lr`, `--warmup`, `--weight-decay`, `--grad-clip` | 3e-4, 100, 0.01, 1.0 | AdamW (betas 0.9 / 0.98), linear warm-up, cosine decay to 0 |
+| `--amp`, `--device`, `--workers`, `--seed` | off, auto, 2, 0 | bf16 autocast, device, DataLoader workers, RNG seed |
+| `--task-probs` | `B=0.25,T=0.25,P=0.25,Z=0.25` | share of samples per task (normalised) |
+| `--zone-frac`, `--zone-position`, `--mask-fill` | 0.35, `middle`, `alt` | task Z: masked share, where, dummy vector (`alt` = -0.1/+0.1, `zero`) |
+| `--pit-window` | `18,24` | task P: seconds behind the reference car |
+| `--ghost-edge-mode`, `--pit-edge-mode` | `relational`, `topology` | edge visibility around hidden cars, see [leakage controls](#temporal-leakage-controls) |
+| `--loss-kind`, `--cos-weight` | `mse`, 0 | `mse` / `huber` / `cosine`; weight of an extra cosine term |
+| `--p-contrast`, `--pairs`, `--phase-bins`, `--temperature`, `--contrast-weight` | 0, 8, 10, 0.1, 1.0 | contrastive steps, see [above](#contrastive-objective) |
+| `--val-frac`, `--block-s` | 0.1, 180 | validation share; block length (seconds) of the few-races split |
+| `--eval-every`, `--eval-windows` | 250, 64 | evaluation interval; validation windows per task |
+
+Files in `--out`: `args.json` (all arguments, model config, validation description), `log.jsonl` (one line per step, with the
+per-task losses, `top1` for contrastive steps and an `eval` entry at evaluation steps; appended to, never overwritten) and
+`ckpt.pt` (weights, model config, scale, number of tokens, step). `ckpt.pt` is rewritten at every evaluation and at the last, 
+while `best.pt` has the best overall score
+step: no optimiser state and no `--resume` yet. Keep the process alive and raise the file limit for long
+runs exactly as for the snapshot model (`nohup bash -c "ulimit -n 65536 && python -m f1strategy.seqbert.train ..."`).
+
+### Measured cost and the benchmark
+
+`seqbert.bench` times one full training step (masking, forward, backward, optimiser) for every combination of scale, encoder
+and batch size, and `--probe` doubles the batch size until it no longer fits (CUDA out-of-memory) or a step takes more than
+30 s. On CUDA it reports torch's peak allocated memory; on CPU only the process high-water mark, which is not comparable
+between rows. **Run it on the target GPU before choosing batch sizes.** The only numbers measured so far are from a CPU-only
+sandbox (one core, `small` preset, batch size 2, one race), useful for *relative* cost only:
+
+| Scale | Tokens | Encoder | Frames per step | Parameters | s per step (1 CPU core) |
+|---|---|---|---|---|---|
+| short | 20 | flatten / sector / gnn | 40 | 8.33 / 5.76 / 6.27 M | 0.11 / 0.08 / 0.16 |
+| medium | 96 | flatten / sector / gnn | 192 | same | 0.20 / 0.21 / 0.53 |
+| long | 192 | flatten / sector / gnn | 384 | same | 0.40 / 0.32 / 1.09 |
+
+The graph encoder dominates at these sizes (cost ~ frames per step; `gnn` ~ 2.5-3x `flatten`). Attention over time is
+`T x T` per sample and layer, so at `long` (192 tokens) it is still small; it would only become the bottleneck for a much
+larger `--n-tokens` (a 1,800-token "10 laps at 0.5 s" window would be ~90x the attention cost of 192 tokens).
+
+### Figures for reports
+
+`python -m f1strategy.seqbert.visualize --cache cache --out figures` renders five figures from the real cache (the ones in this
+README are from the 2019 Australian GP): `fig1_architecture.png` (the pipeline), `fig2_graph_to_vector.png` (a graph and its
+three vectorisations), `fig3_sequence.png` (a 10 s sequence of eight frames with a ghost car and its hidden speed trace),
+`fig4_scales.png` (the three window scales on one race) and `fig5_task_masks.png` (what each task hides).
+
+<p align="center">
+  <img src="docs/images/fig3_sequence.png" alt="A sequence of eight graphs with a ghost car" width="900"><br>
+  <em>A 10 s sequence (task B): the red car is a ghost in every frame; below, its hidden speed against the other cars.</em>
+</p>
+
+### Using a temporal checkpoint
+
+There is no `load_encoder` helper for the temporal model yet. A checkpoint is rebuilt like this, with *everything visible*
+(`SeqMasker.plain` with no token dropout), which is the input a fine-tuning head would see:
+
+```python
+import torch
+from f1strategy.seqbert import data as D
+from f1strategy.seqbert.config import SCALES
+from f1strategy.seqbert.masking import SeqMasker
+from f1strategy.seqbert.model import SeqBertConfig, SeqF1Bert
+
+ck = torch.load("runs/seq_short/ckpt.pt", map_location="cpu")
+model = SeqF1Bert(SeqBertConfig(**ck["cfg"])).eval()
+model.load_state_dict(ck["model"])
+
+scale = SCALES[ck["scale"]]
+ix = D.WindowIndex(D.open_races("cache"), scale)
+raw = torch.utils.data.default_collate([D.WindowDataset(ix)[0]])       # one window
+mb = SeqMasker().plain(raw, token_dropout=0.0)                         # nothing masked
+h = model.encode(mb, scale.scale_id)                                   # [B, 1 + T, hidden]; h[:, 0] is [CLS]
+```
+
+If the checkpoint was trained with `--n-tokens`, `--span-s` or `--span-laps`, build the same scale (`dataclasses.replace`) before
+making the windows. `h[:, 0]` summarises the sequence; `h[:, 1:]` are the time-contextualised graph vectors.
+
+### Status and limitations of the temporal model
+
+**What has been run.** The code is covered by 13 offline tests (`tests/seqbert`, on the synthetic session) and was exercised on
+the 2019 Australian GP cache on a CPU: all three scales and all three graph encoders train, evaluate and write checkpoints.
+**No full-corpus run exists yet, so there are no trained-model results to report.** The only learning check is a smoke test
+(`tiny` preset, `flatten`, one race, 600 steps at batch size 16, 15 % contrastive steps; validation = interleaved blocks of the
+*same race*, so it is optimistic):
+
+| Metric (validation, fixed masks) | Model | Baseline |
+|---|---|---|
+| T: compound accuracy | 0.92 | 0.46 (majority class) |
+| T: tyre-age MAE (laps) | 4.8 | 6.5 (batch mean) |
+| B: ghost-car position MAE (places) | 1.6 | - |
+| B: ghost-car speed MAE (km/h) | 55.8 | 61.1 (batch mean) |
+| Z: speed MAE across the masked block (km/h) | 54.5 | 68.3 (mean); **18.3 (linear interpolation)** |
+| P: gap-to-leader MAE of hidden cars (s) | 22.0 | **17.0 (batch mean)** |
+| K: partner retrieval among 16 views (chance 0.07) | 0.4-0.9, noisy | - |
+
+Read it honestly: the tyre task and the contrastive objective learn quickly; the zone task does **not** yet beat linear
+interpolation and the pit-return task is still worse than predicting the mean gap, which is expected after 600 steps of a
+0.5 M-parameter model on one race, and says nothing about a `small` model on the full corpus. Compare against the `*_mean`,
+`*_interp` and `*_majority_acc` entries of the log before trusting any task.
+
+**Limitations and open points**
+
+* **The 1-layer linear head is a bottleneck by design:** a `hidden`-dimensional vector must carry the whole frame (22 cars x 42
+  features, flags, global). If zone masking stays behind interpolation on the full corpus, a larger `hidden`, a better graph
+  encoder or a wider head is the first thing to try.
+* **Not permutation-equivariant, no identity:** the vector is slot-ordered (alphabetical code), unlike the snapshot model, and
+  no driver or team identity is an input.
+* **The pit-return window is a masking task, not a pit-stop model.** It teaches the traffic behind a car; it does not model the
+  pit stop itself, the lane time loss of a given circuit (18-24 s is a parameter) or what happens in the window afterwards.
+* **Temporal resolution:** the cache is 2 Hz; `medium` and `long` step 2 and 9 frames, so transients shorter than a token
+  (a lock-up, a short yellow) are invisible there. Time between tokens differs slightly per race; only the scale embedding
+  tells the model which scale it is looking at, there is no elapsed-time embedding.
+* **Contrastive learning** needs several races and years to mean anything; the circuit matching uses the curvature profile
+  and is untested on real cross-year data (the sample cache has one race).
+* **Training script gaps:** no `--resume`, no `best.pt` (the checkpoint is overwritten at every evaluation), no optimiser state,
+  no per-task loss weights, no mixed-scale training, no multi-GPU. The graph encoder runs on frames that task Z then discards.
+* **Memory is unmeasured on GPU.** The benchmark exists, the numbers do not (see above).
+* **Validation is optimistic with few races** (blocks of the same race); use whole-race hold-out (>= 5 races) for any claim.
+* **Position leak** (which rank is missing) is accepted, see [the leakage controls](#temporal-leakage-controls).
 
 ## Limitations and caveats
 
@@ -1119,7 +1493,7 @@ ruff check . && ruff format --check .      # lint + format
 |---|---|---|
 | Unit | `tests/unit` | One module at a time: geometry on analytic shapes (a circle has a known curvature), race-control replay, telemetry interpolation, anchoring, timing, exporter, plotting, sequence / Parquet round trips, CLI helpers, documentation drift. Includes property-based tests (hypothesis). |
 | Integration | `tests/integration` | End to end: dataset assembly, determinism, **causality**, continuous workflow (file -> windows -> tensors -> GIF), CLI. |
-| Pre-training | `tests/pretrain` | Cache equals the source dataset, split without overlap, flagged-frame oversampling, **leakage** (hidden cells overwritten with garbage give bit-identical output), mask reproducibility, forward / backward for all tasks, permutation equivariance, absent drivers have no influence, loss decreases on a fixed batch, `train` CLI and checkpoint round trip. Needs PyTorch. |
+| Sequence pre-training | `tests/seqbert` | Task-mask invariants (targets never visible, ghost car one slot over all frames, tyre cells only, pit-window cars exactly 18-24 s behind a visible reference car, zone = contiguous middle block), edge features restating a hidden speed are hidden, all three graph encoders forward / backward, **masked vectors carry no information** (noise in masked frames gives identical output), **ghost values do not leak**, dummy-vector pattern, leak-free window split, circuit matching, contrastive loss, `train` CLI smoke run. Needs PyTorch. |
 | Live | `tests/live` | The real FastF1 API on the 2025 Belgian GP. Deselected by default. |
 
 All offline tests run against `tests/synthetic/session.py`: a synthetic session that mimics FastF1's structure (column
@@ -1133,144 +1507,8 @@ first verifies a real dataset, the second plots a training log (see above).
 ### Documentation
 
 `README.md` is generated: the feature tables, the command line table and the storage table come from the code. Edit
-`docs/readme_template.md` (the placeholders `| Feature | Meaning |
-|---|---|
-| `s_m` | Distance from the start/finish line along the lap, in metres. |
-| `x_m` | World x of the node (frame of the FastF1 position feed), metres. |
-| `y_m` | World y of the node, metres. |
-| `z_m` | Elevation of the node, metres. |
-| `heading_sin` | Direction of the track tangent, `sin(atan2(dy, dx))`. |
-| `heading_cos` | Direction of the track tangent, `cos(atan2(dy, dx))`. |
-| `curvature` | Signed curvature in 1/m, positive = left turn (from a ~12 m smoothed centre line). |
-| `gradient` | Slope `dz/ds` (metre per metre). |
-| `sector_1` | One-hot official timing sector 1 (boundaries come from the reference lap's sector times). |
-| `sector_2` | One-hot official timing sector 2. |
-| `sector_3` | One-hot official timing sector 3. |
-| `is_corner` | 1 on the node closest to a numbered corner marker. |
-| `corner_number` | Corner number of that marker (0 = none). |
-| `marshal_sector` | Marshal sector the node lies in (-1 = unknown) - the unit in which sector yellow flags are issued. |
-| `in_drs_zone` | Node is inside an inferred DRS activation zone. |
-| `is_drs_start` | First node of a DRS zone (the activation line). |
-| `is_drs_end` | Last node of a DRS zone. |
-| `is_drs_detection` | Nearest node to a DRS detection point (only when you supply them, see Limitations). |
-| `flag_yellow` | Yellow flag in this node's marshal sector. |
-| `flag_double_yellow` | Double yellow in this node's marshal sector. |
-| `flag_sc` | Safety car deployed (applies to every node). |
-| `flag_vsc` | Virtual safety car deployed (every node). |
-| `flag_vsc_ending` | VSC ending (every node). |
-| `flag_red` | Red flag (every node). |
-| `n_drivers` | Number of cars whose nearest track node is this one. |`, `| Feature | Meaning |
-|---|---|
-| `x_m` | Car position at the snapshot time (interpolated), metres. |
-| `y_m` | Car position y, metres. |
-| `z_m` | Car elevation, metres. |
-| `speed_kmh` | Speed from the car data channel, interpolated. |
-| `vx_mps` | Velocity x from the position feed (central difference over +-0.3 s), m/s. |
-| `vy_mps` | Velocity y, m/s. |
-| `heading_sin` | Direction of travel `sin(atan2(vy, vx))`; below 2 m/s the track tangent is used instead. |
-| `heading_cos` | Direction of travel, cosine. |
-| `heading_rel_track_sin` | Heading relative to the track tangent, sine (about 0 when aligned; large when spinning or in the pit lane). |
-| `heading_rel_track_cos` | Heading relative to the track tangent, cosine. |
-| `throttle` | Throttle in percent. |
-| `brake` | Brake on (0/1). |
-| `gear` | Gear. |
-| `rpm` | Engine revs. |
-| `drs_open` | DRS flap open (raw DRS channel 10, 12 or 14). |
-| `drs_eligible` | Raw DRS channel equals 8 ("detected / eligible"; semantics are not officially documented). |
-| `track_s_m` | Distance from the start/finish line of the car's projection onto the centre line, metres. |
-| `lap_fraction` | `track_s_m` divided by the track length (jumps from 1 to 0 at the start/finish line). |
-| `lap_fraction_sin` | `sin(2 pi lap_fraction)`: the wrap-safe encoding of the lap position, continuous across the line. |
-| `lap_fraction_cos` | `cos(2 pi lap_fraction)`. |
-| `lateral_offset_m` | Signed distance from the reference line, metres (+ = left). |
-| `progress_m` | Cumulative race distance (laps x length + position); 0 at the line at lights-out, grid slots are slightly negative. |
-| `lap_number` | Lap the car is on, from the timing table. |
-| `position` | Live race position, ranked by `progress_m`. |
-| `official_position` | Classified position at the end of the car's last completed lap (NaN before the first). |
-| `gap_to_leader_s` | True time gap to the leader: how long ago was the leader where this car is now. |
-| `gap_ahead_s` | Same, to the car directly ahead (NaN for the leader). |
-| `gap_behind_s` | Same, of the car directly behind to this car (NaN for the last car). |
-| `tyre_age` | Laps on the current set (FastF1 `TyreLife`). |
-| `fresh_tyre` | Current set was new when fitted. |
-| `stint` | Stint number. |
-| `pit_stops` | Pit lane entries so far (a pure count of entries up to the snapshot time). |
-| `in_pit` | Car is in the pit lane right now (between pit entry and the next lap's pit exit). |
-| `on_track` | Position feed status is not `OffTrack`. |
-| `pos_age_s` | Seconds since the newest *real* position sample behind this row (0 exactly at a sample, up to ~0.22 s; NaN before the first sample, grows if the stream stops). |
-| `car_age_s` | Same for the car-data stream (speed, throttle, ...; ~0.24 s interval). |
-| `pace_last3_s` | Mean of the last three completed representative laps (no in/out laps, none with SC/VSC/red), seconds. |
-| `last_lap_time_s` | Time of the last completed lap, seconds. |
-| `finished_or_retired` | More than 5 s have passed since the car's final lap timestamp. |
-| `compound_soft` | One-hot: current tyre compound is SOFT. |
-| `compound_medium` | One-hot: current tyre compound is MEDIUM. |
-| `compound_hard` | One-hot: current tyre compound is HARD. |
-| `compound_intermediate` | One-hot: current tyre compound is INTERMEDIATE. |
-| `compound_wet` | One-hot: current tyre compound is WET. |
-| `compound_unknown` | One-hot: compound unknown / not in the list above. |`, `| Feature | Meaning |
-|---|---|
-| `time_s` | Snapshot time in session seconds. |
-| `leader_lap` | Lap of the race leader. |
-| `laps_remaining` | Scheduled laps minus leader lap (NaN if unknown). |
-| `race_fraction` | Leader lap divided by scheduled laps. |
-| `is_green` | No flag anywhere: track status clear and no sector flags. |
-| `is_yellow` | Yellow somewhere: track status yellow or any sector flagged. |
-| `is_sc` | Safety car deployed. |
-| `is_vsc` | Virtual safety car deployed. |
-| `is_vsc_ending` | VSC ending. |
-| `is_red` | Red flag. |
-| `sc_in_this_lap` | Race control announced "SAFETY CAR IN THIS LAP" (reset at all-clear). |
-| `yellow_unlocalised` | Track status says yellow but no marshal sector is known (messages missing). |
-| `n_yellow_sectors` | Number of marshal sectors currently under yellow / double yellow. |
-| `drs_enabled` | Race control has enabled DRS. Disabled until the first enabling message; unknown (masked) if there is no message feed at all. |
-| `air_temp` | Air temperature, deg C. |
-| `track_temp` | Track temperature, deg C. |
-| `humidity` | Relative humidity, percent. |
-| `pressure` | Air pressure, mbar. |
-| `rainfall` | Rain (0/1). |
-| `wind_speed` | Wind speed, m/s. |
-| `wind_direction_sin` | Wind direction, sine. |
-| `wind_direction_cos` | Wind direction, cosine. |
-| `n_drivers` | Number of cars in the snapshot. |`, `| Feature | Meaning |
-|---|---|
-| `gap_s` | Time gap seen from the source car; **positive = the target is ahead**. NaN when undefined (e.g. a lap apart, never reached that point). |
-| `progress_gap_m` | Difference in cumulative race distance, target minus source, metres. |
-| `circular_gap_m` | Shortest signed distance along the track ignoring laps, in (-L/2, L/2]; this is what connects lapped traffic. |
-| `lap_diff` | Whole laps the target is ahead of the source (negative = behind). |
-| `rel_speed_kmh` | Target speed minus source speed. |
-| `order_neighbor` | The two cars are consecutive in the running order. |
-| `drs_window` | Source is the follower, within 1.0 s of the target and on the same lap (approximates the DRS rule with the true gap). |`, `| Option | Default | Meaning |
-|---|---|---|
-| `--year` | 2025 | Season. |
-| `--event` | `Belgian Grand Prix` | Event name (fuzzy-matched by FastF1) or, if all digits, the round number. |
-| `--session` | `R` | Session identifier: `R`, `Q`, `S`, `SQ`, `FP1`... |
-| `--lap` | 44 | Lap whose sector crossings define the sector snapshots (taken when the **leader** crosses the sector line). |
-| `--sectors` | all three | Any of `"Sector 1"` `"Sector 2"` `"Sector 3"`. |
-| `--out-dir` | `graphs` | Where PNGs and `.npz` files go; in continuous mode also the dataset and GIF (`sequence_lap<from>-<to>`). |
-| `--spacing` | 10 | Track node spacing in metres. |
-| `--max-tokens` | 512 | Token budget used to choose the track pooling factor. |
-| `--drs-detection-offset` | none | Estimate DRS detection points as *zone start minus this many metres*. |
-| `--cache-dir` | `$F1_CACHE_DIR` or `~/fastf1_cache` | FastF1 cache directory. |
-| `--continuous` | off | **Continuous mode**: also sample the race graph densely over a lap window, save it and render a GIF. |
-| `--from-lap` | `--lap` | First lap of the continuous window (starts when the leader starts it). |
-| `--to-lap` | `--from-lap` | Last lap of the window (ends when the leader completes it); above the session's last lap it is clamped, so `99` means the whole race. |
-| `--step` | 1.0 | Seconds between two frames (or give `--hz`). |
-| `--hz` | none | Frames per second of *data*, e.g. `10`; an alternative to `--step` (not the GIF rate: that is `--fps`). |
-| `--format` | `parquet` | Dataset format: `parquet` (a directory, streamed in chunks), `npz` (one file, in memory) or `both`. |
-| `--chunk-frames` | 2000 | Frames per Parquet part / in-memory chunk; this is what bounds the memory use. |
-| `--gif-every` | auto | Use every n-th frame in the GIF; automatic means at most 300 frames. |
-| `--fps` | 10 | Playback frames per second of the GIF. |
-| `--no-gif` | off | Continuous mode: write only the dataset, no GIF. |
-| `--no-snapshots` | off | Skip the sector snapshots (tables, plots, npz); needs `--continuous`. |
-| `--no-tables` | off | Skip the console tables (sector snapshots). |
-| `--no-plots` | off | Skip the PNG plots. |
-| `--no-export` | off | Skip the `.npz` export. |
-| `--verbose` | off | Debug logging (`-v`). |`, `| Array | Shape / dtype | Size |
-|---|---|---|
-| `track_flags` | `[T, N]` uint8 | 3.8 MB |
-| `driver_x` + `driver_mask` | `[T, D, 45]` float32 + bool | 24.3 MB |
-| `edge_attr` + `edge_attr_mask` + `edge_exists` | `[T, D, D, 7]` float32 + bool, `[T, D, D]` bool | 77.8 MB |
-| `global_x` + `global_mask` | `[T, 23]` | 0.6 MB |
-| `driver_to_track`, `driver_present`, `times` | `[T, D]`, `[T]` | 0.6 MB |
-| **Total** | T = 5400, D = 20, N = 695 | **107 MB** |`, ... are
+`docs/readme_template.md` (the placeholders are the names TRACK, DRIVER, GLOBAL, EDGE, CLI, SIZES and a few more, each written between double curly
+braces, and are
 filled in) and run `python scripts/generate_readme.py` (`--check` verifies); a test fails when the README is stale, when a
 feature or CLI option is missing from it, when a source module is missing from the project structure, or when an image it
 references does not exist.
@@ -1326,19 +1564,23 @@ Formula-1/
 │   │   ├── builder.py            SequenceBuilder: dense (graph-free) frames, chunked
 │   │   ├── dataset.py            RaceSequence: compact continuous dataset
 │   │   └── parquet.py            ParquetSequenceWriter / ParquetSequence (Polars)
+│   ├── seqbert/
+│   │   ├── config.py             the three sequence scales (10 s / 1 lap / 10 laps), model presets
+│   │   ├── data.py               WindowIndex, window dataset, leak-free split, circuit ids, contrastive pair sampler
+│   │   ├── masking.py            SeqMasker: ghost car, tyre set, pit-return window, zone (vector) masking
+│   │   ├── encoders.py           graph -> vector: flatten, sector, GNN
+│   │   ├── model.py              SeqF1Bert: nn.TransformerEncoder over time, 1-layer head, projection head
+│   │   ├── losses.py             reconstruction / contrastive losses, physical-unit metrics, baselines
+│   │   ├── train.py              temporal pre-training loop, checkpoints
+│   │   └── bench.py              time and memory per scale x encoder x batch size
 │   └── pretrain/
 │       ├── schema.py             feature lists, task groups, leak maps, per-race normalisation
 │       ├── cache.py              Parquet datasets -> memory-mappable race caches
-│       ├── data.py               RaceCache, PretrainDataset, validation split, frame weights
-│       ├── masking.py            the four pretext tasks as batched GPU masking
-│       ├── model.py              F1Bert: graph-aware BERT encoder and pre-training heads
-│       ├── losses.py             per-task losses and physical-unit validation metrics
-│       ├── train.py              self-supervised pre-training loop, checkpoints
-│       └── bench.py              time of one training step (cpu / gpu)
+│       └── data.py               RaceCache, PretrainDataset, validation split, frame weights
 ├── tests/
 │   ├── unit/                     one module at a time
 │   ├── integration/              end to end, causality, CLI
-│   ├── pretrain/                 cache, masking / leakage, model, training
+│   ├── seqbert/                  windows, task masks / leakage, encoders, contrastive, training
 │   ├── live/                     real FastF1 API (deselected by default)
 │   ├── synthetic/                the synthetic FastF1 session used by all offline tests
 │   ├── test_dataset.py           utility: verify a Parquet dataset and render a diagnostic GIF
@@ -1352,15 +1594,17 @@ Formula-1/
 
 Directories that scripts create (large ones are not meant to be committed; check `.gitignore` before adding them):
 
-| Path | Written by | Content |
-|---|---|---|
-| `graphs/` | `python main.py` (`--out-dir`) | sector PNGs / `.npz`, continuous GIFs and datasets; the examples kept there are a Barcelona run (`graph_Barcelona_lap42_sector*.png`, `sequence_lap40-50.gif`, `sequence_lap1-10.gif`), older sector plots (`graph_hu_25_*`, `graph_sector*.png`) and `test.gif`, the verification GIF of the 2019 Australian GP |
-| `parquet_datasets/` | `scripts/scrape.sh` | one `<year>_round_<NN>.ds/sequence_lap1-<N>/` Parquet dataset per race (~100 MB each) |
-| `scraping_logs/` | `scripts/scrape.sh` | `output_<year>.log` per season, FastF1 log output included (large for 2023-2025) |
-| `cache/` | `pretrain.cache` | one memory-mappable cache directory per race (~118 MB each) |
-| `runs/pre1/` | `pretrain.train` | `best.pt`, `last.pt` (~60 MB each), `log.jsonl`, `args.json`; `runs/bert_pretraining_metrics.png` is the plot of `visualize_training.py` |
+| Path                     | Written by | Content |
+|--------------------------|---|---|
+| `graphs/`                | `python main.py` (`--out-dir`) | sector PNGs / `.npz`, continuous GIFs and datasets; the examples kept there are a Barcelona run (`graph_Barcelona_lap42_sector*.png`, `sequence_lap40-50.gif`, `sequence_lap1-10.gif`), older sector plots (`graph_hu_25_*`, `graph_sector*.png`) and `test.gif`, the verification GIF of the 2019 Australian GP |
+| `parquet_datasets/`      | `scripts/scrape.sh` | one `<year>_round_<NN>.ds/sequence_lap1-<N>/` Parquet dataset per race (~100 MB each) |
+| `scraping_logs/`         | `scripts/scrape.sh` | `output_<year>.log` per season, FastF1 log output included (large for 2023-2025) |
+| `cache/`                 | `pretrain.cache` | one memory-mappable cache directory per race (~118 MB each) |
+| `runs/pre1/`             | `pretrain.train` | `best.pt`, `last.pt` (~60 MB each), `log.jsonl`, `args.json`; `runs/bert_pretraining_metrics.png` is the plot of `visualize_training.py` |
+| `runs/pre2+/`            | `seqbert.train` | `ckpt.pt` (rewritten at every evaluation), `args.json`, `log.jsonl` |
+| `figures/`               | `seqbert.visualize` | the five report figures of the temporal model (copies used in this README live in `docs/images/seqbert-*.png`) |
 | `train.log`, `nohup.out` | `nohup` | console output of a training run / of an early scrape (`nohup.out` is git-ignored) |
-| `docs/docs/` | by hand | project notes: see [Related work](#related-work) |
+| `docs/docs/`             | by hand | project notes: see [Related work](#related-work) |
 
 ## Changelog and migration
 
@@ -1368,6 +1612,12 @@ Directories that scripts create (large ones are not meant to be committed; check
 data, masking, model, losses, train, bench) and its tests; `torch` is now a runtime dependency; bulk scraping scripts
 (`scripts/scrape.sh`, `scripts/scrape_data.sh`); `--to-lap` is clamped to the session's last lap; helper scripts
 `tests/test_dataset.py` and `tests/visualize_training.py`; README rewritten around the whole pipeline.
+
+**Temporal pre-training (also unreleased).** New `f1strategy.seqbert` package (config, data, masking, encoders, model, losses,
+train, bench, visualize) and `tests/seqbert`: windows of 10 s / 1 lap / 10 laps, three graph encoders (flatten, sector, GNN), a
+BERT encoder over time, tasks B (ghost car), T (tyre set), P (pit-return window), Z (zone) and an optional contrastive objective,
+interpolation / majority / mean baselines in the validation metrics. The pre-training schema drops `official_position`,
+`pos_age_s` and `car_age_s` (leaks). The README no longer carries the earlier sketch of a temporal module in `pretrain/`.
 
 **0.4.0 (10 Hz and Parquet).** Two new driver features (`pos_age_s`, `car_age_s`, so 45 in total),
 `RaceGraphBuilder.snapshot()` (plain data; `build()` now wraps it and returns the same graph), `GraphExporter.export_snapshot()`
