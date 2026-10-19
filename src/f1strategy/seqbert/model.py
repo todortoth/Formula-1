@@ -12,6 +12,7 @@ absolute positions, a [CLS] summary token); the *tokens are time steps*, not nod
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass
 
 import torch
@@ -38,9 +39,13 @@ class SeqBertConfig:
     gnn_layers: int = 2
     mask_fill: str = "alt"
     proj_dim: int = 64
+    time_embed: bool = False  # add an embedding of the elapsed seconds, so one model can read all three scales
 
     def as_dict(self) -> dict:
         return asdict(self)
+
+
+N_TIME_PERIODS = 12
 
 
 def target_dim(D: int = S.MAX_DRIVERS, M: int = S.N_TRACK_TOKENS) -> int:
@@ -59,6 +64,11 @@ class SeqF1Bert(nn.Module):
         self.cls = nn.Parameter(torch.zeros(1, 1, H))
         self.pos = nn.Embedding(cfg.max_len + 1, H)
         self.scale = nn.Embedding(3, H)
+        if cfg.time_embed:  # sin / cos of the elapsed seconds at 12 log-spaced periods (2 s ... 4000 s)
+            self.time_proj = nn.Linear(2 * N_TIME_PERIODS, H)
+            self.register_buffer(
+                "periods", torch.logspace(math.log10(2.0), math.log10(4000.0), N_TIME_PERIODS), persistent=False
+            )
         self.emb_norm = nn.LayerNorm(H)
         self.emb_drop = nn.Dropout(cfg.dropout)
         layer = nn.TransformerEncoderLayer(
@@ -84,6 +94,10 @@ class SeqF1Bert(nn.Module):
         v = torch.where(mb.vec_mask[..., None], self.fill.to(v.dtype).expand(B, T, H), v)  # dummy vectors (task Z)
         x = torch.cat([self.cls.expand(B, 1, H), v], 1)
         x = x + self.pos(torch.arange(T + 1, device=x.device))[None] + self.scale.weight[scale_id]
+        if self.cfg.time_embed:
+            ang = 2 * math.pi * mb.t_rel[..., None] / self.periods
+            te = self.time_proj(torch.cat([ang.sin(), ang.cos()], -1).to(x.dtype))
+            x = x + torch.cat([torch.zeros_like(te[:, :1]), te], 1)  # [CLS] has no time
         x = self.emb_drop(self.emb_norm(x))
         pad = torch.cat([torch.zeros(B, 1, dtype=torch.bool, device=x.device), ~mb.ok], 1)
         return self.encoder(x, src_key_padding_mask=pad)

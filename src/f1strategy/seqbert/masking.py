@@ -77,6 +77,7 @@ class SeqBatch:
     edge_exists: torch.Tensor  # [B, T, D, D] bool (visible existence)
     vec_mask: torch.Tensor  # [B, T] bool, whole graph vector replaced by the dummy vector (task Z / token dropout)
     ref: torch.Tensor  # [B, D] bool, reference car of task P (visible), else False
+    t_rel: torch.Tensor  # [B, T] float, seconds since the first token of the window
 
     def to(self, device) -> SeqBatch:
         return SeqBatch(**{k: v.to(device) for k, v in self.__dict__.items()})
@@ -247,7 +248,7 @@ class SeqMasker:
             slot_masked=slot_masked, comp_tgt=comp_tgt, comp_idx=comp_idx, tok=raw["tok"], tok_vis=tok_vis,
             glb_x=glb_x, glb_valid=glb_valid, trk_static=torch.nan_to_num(raw["trk"]), flag_x=flag_x,
             ysec=ysec, dsec=dsec, n_cars_tok=n_cars, edge_x=edge_x, edge_vis=edge_vis, edge_exists=edge_exists,
-            vec_mask=vec_mask, ref=ref,
+            vec_mask=vec_mask, ref=ref, t_rel=(raw["t"] - raw["t"][:, :1]).float(),
         )  # fmt: skip
 
     def plain(self, raw, generator=None, token_dropout: float = 0.15) -> SeqBatch:

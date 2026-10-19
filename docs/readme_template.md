@@ -49,17 +49,9 @@ representation-learning foundation for that.
   - [Conventions](#conventions)
 - **Stage 2 - the corpus**
   - [Building the corpus (bulk scraping)](#building-the-corpus-bulk-scraping)
-- **Stage 3 and 4 - pre-training**
+- **Stage 3 - training cache**
   - [Training cache](#training-cache)
-  - [Self-supervised pre-training](#self-supervised-pre-training)
-  - [Model](#model)
-  - [The pretext tasks](#the-pretext-tasks)
-  - [Leakage controls](#leakage-controls-what-makes-the-tasks-non-trivial)
-  - [Training details](#training-details)
-  - [Results of the first run](#results-of-the-first-run)
-  - [Using the checkpoint](#using-the-checkpoint)
-  - [Pre-training limitations](#pre-training-limitations)
-- **Stage 5 - temporal (sequence) pre-training**
+- **Stage 4 - temporal (sequence) pre-training**
   - [Temporal (sequence) pre-training](#temporal-sequence-pre-training)
   - [From snapshots to sequences](#from-snapshots-to-sequences)
   - [The three sequence scales](#the-three-sequence-scales)
@@ -74,7 +66,15 @@ representation-learning foundation for that.
   - [Measured cost and the benchmark](#measured-cost-and-the-benchmark)
   - [Figures for reports](#figures-for-reports)
   - [Using a temporal checkpoint](#using-a-temporal-checkpoint)
-  - [Status and limitations of the temporal model](#status-and-limitations-of-the-temporal-model)
+  - [Results so far and status](#results-so-far-and-status)
+- **Archive - the single-snapshot model (code removed)**
+  - [Archived: the single-snapshot model](#archived-the-single-snapshot-model)
+  - [Model](#model-snapshot-model)
+  - [The snapshot pretext tasks](#the-snapshot-pretext-tasks)
+  - [Leakage controls](#leakage-controls-what-makes-the-tasks-non-trivial)
+  - [Training details](#training-details-snapshot-model)
+  - [Results of the first run](#results-of-the-first-run-snapshot-model)
+  - [Limitations of the snapshot model](#limitations-of-the-snapshot-model)
 - [Limitations and caveats](#limitations-and-caveats)
 - [Testing and continuous integration](#testing-and-continuous-integration)
 - [Project structure](#project-structure)
@@ -105,8 +105,8 @@ flowchart LR
 | **1. Session to frames**     | `python main.py --continuous --hz 10 ...` (`SessionAnalyser`, `SequenceBuilder`, `ParquetSequenceWriter`) | a FastF1 session (laps, position and car data, track status, race control, weather) | `<out-dir>/sequence_lap<a>-<b>/` Parquet dataset: `manifest.json`, `track.parquet`, `drivers/`, `global/`, `edges/` | 2019 Australian GP: 51,276 frames (10 Hz, 5,128 s), 26 chunks, 104.5 MB on disk (zstd) |
 | **2. Corpus**                | `scripts/scrape.sh` -> `scripts/scrape_data.sh <year>` | the 2019-2025 calendars | `parquet_datasets/<year>_round_<NN>.ds/sequence_lap1-<N>/` per race, logs in `scraping_logs/` | 7 parallel workers, one per season; 152 rounds scheduled, Belgium 2021 fails (see [corpus](#building-the-corpus-bulk-scraping)) |
 | **3. Training cache**        | `python -m f1strategy.pretrain.cache` | the Parquet datasets | `cache/<year>_round_<NN>/` with `meta.json` and `.npy` memory maps | stride 5 -> ~10 k frames and ~118 MB per race (2019 Australian GP: 10,256 frames) |
-| **4. Temporal pre-training** | `python -m f1strategy.seqbert.train` | the caches (windows of 10 s / 1 lap / 10 laps) | `runs/<name>/ckpt.pt`, `log.jsonl`, `args.json` | `small` preset: 5.8-8.3 M parameters depending on the graph encoder; cost: see [measured cost](#measured-cost-and-the-benchmark) |
-| **5. Inspection**            | `tests/test_dataset.py`, `tests/visualize_training.py`, `python -m f1strategy.pretrain.bench`, `python -m f1strategy.seqbert.bench`, `python -m f1strategy.seqbert.visualize` | a dataset / `train.log` / a cache | verification GIF, loss plot, per-step timing, report figures | - |
+| **4. Temporal pre-training** | `python -m f1strategy.seqbert.train` | the caches (windows of 10 s / 1 lap / 10 laps, one scale per run or `--scale mixed` for all three at once) | `runs/<n>/best.pt` (best weights; `best_<scale>.pt` per scale in a mixed run), `ckpt.pt` (latest, resumable), `log.jsonl`, `args.json` | `base` preset with the GNN encoder: 16.4 M parameters, ~0.085 s/step in the first scale tests; see [measured cost](#measured-cost-and-the-benchmark) |
+| **5. Inspection**            | `tests/test_dataset.py`, `tests/visualize_training_loss.py`, `python -m f1strategy.seqbert.bench`, `python -m f1strategy.seqbert.visualize` | a dataset / `log.jsonl` / a cache | verification GIF, loss plot, per-step timing and memory, report figures | - |
 
 Each stage only depends on the files written by the previous one, so any stage can be re-run on its own. The **schema** is
 the contract between the stages: the feature name lists (42 driver in the training schema, 23 global, 7 edge, 18 static track features, 6 flag
@@ -138,7 +138,7 @@ from the lists in `pretrain/schema.py`.
 - **A full-season corpus.** One command per season scrapes every race of 2019-2025 at 10 Hz into Parquet, resumable and
   logged per season.
 - **Temporal graph BERT.** A second model (`f1strategy.seqbert`) turns every graph of a sequence into one vector (GNN, flatten or
-  sector pooling) and runs a bidirectional `nn.TransformerEncoder` over *time*, on windows of 10 s, 1 lap or 10 laps. Pre-trained
+  sector pooling) and runs a bidirectional `nn.TransformerEncoder` over *time*, on windows of 10 s, 1 lap or 10 laps (one scale per run, or all three at once in one model). Pre-trained
   with ghost-car, tyre-set, pit-return-window and zone masking plus an optional contrastive objective; benchmark script and
   report figures included.
 - **Animated GIF** of the same arrays (flag-coloured track, cars with trails, leaderboard, flag banner), next to the
@@ -240,17 +240,17 @@ scripts/scrape.sh                                  # edit the venv path inside f
 # 3) Parquet -> memory-mappable caches (2 Hz, normalised, track pooled to 128 tokens)
 python -m f1strategy.pretrain.cache --src parquet_datasets --dst cache --stride 5
 
-# 4) pre-train on single snapshots (writes runs/pre1/best.pt, last.pt, log.jsonl, args.json)
-python -m f1strategy.pretrain.train --cache cache --out runs/pre1 --preset small --batch-size 64 --amp --workers 8
-
-# 5) pre-train on sequences of graphs (temporal model; one scale per run: short = 10 s, medium = 1 lap, long = 10 laps)
+# 4) pre-train on sequences of graphs: ONE model on all three scales (short = 10 s, medium = 1 lap, long = 10 laps) at once
 python -m f1strategy.seqbert.bench --cache cache --batch-sizes 2 4 8           # what does this machine carry?
-python -m f1strategy.seqbert.train --cache cache --out runs/seq_short --scale short --graph-encoder flatten --amp
+python -m f1strategy.seqbert.train --cache cache --out runs/mixed_gnn --scale mixed --graph-encoder gnn --preset base \
+    --batch-sizes short=128,medium=32,long=16 --scale-probs short=0.55,medium=0.35,long=0.10 --time-embed \
+    --steps 30000 --lr 2e-4 --warmup 2000 --weight-decay 0.05 --dropout 0.15 \
+    --eval-every 1000 --eval-windows 128 --amp
 ```
 
 A single race is enough to try the whole chain: `python main.py --year 2025 --event 5 --continuous --hz 10 --from-lap 1
 --to-lap 99 --no-snapshots --no-gif --out-dir parquet_datasets/2025_round_05.ds`, then run steps 3 and 4 (with fewer than 5
-races the validation split falls back to interleaved time blocks, see [Training details](#training-details)).
+races the validation split falls back to interleaved time blocks, see [Windows and the validation split](#windows-and-the-validation-split)).
 
 ## How it works
 
@@ -717,220 +717,13 @@ of all 150 races is therefore in the order of 15-20 GB. A cache that already has
 > those three columns is rejected. Stage 1 and its tables above still describe the full exporter output (45 driver features);
 > everything from the training cache on (both pre-training models) works with the 42 features.
 
-## Self-supervised pre-training
-
-`src/f1strategy/pretrain/` pre-trains a graph-aware BERT encoder on the caches. There are **no labels and no fine-tuning**
-here: the output is an encoder checkpoint that fine-tuning can start from later.
-
-```bash
-python -m f1strategy.pretrain.train --cache cache --out runs/pre1 --preset small --batch-size 64 --amp --workers 8
-```
-
-The settings of the first full run (35,000 steps, resumed once from the step-15,000 checkpoint; `runs/pre1/args.json`; outdated and not correctly implemented):
-
-```bash
-python -m f1strategy.pretrain.train --cache cache --out runs/pre1 --preset small --steps 35000 --batch-size 64 \
-    --amp --workers 8 --flag-oversample 2 --yellow-pos-weight 5 --task-weights A=1,B=1,C=0.5,D=1 \
-    --resume runs/pre1/last.pt
-```
-
-Ideas that have **not** been tried yet, after seeing that validation gets worse after step ~22,000 (see
-[results](#results-of-the-first-run)): `--dropout 0.2 --weight-decay 0.05 --p-group 0.3 --eval-frames 2048 --task-weights
-A=1,B=1,C=0.1,D=1`.
-
-| Option | Default | Meaning |
-|---|---|---|
-| `--cache`, `--out` | required | cache directory (searched recursively for `meta.json`) and run directory |
-| `--preset` | `small` | `tiny` / `small` / `base`: hidden 128 / 256 / 384, 2 / 6 / 8 layers (about 0.5 M / 5 M / 15 M parameters; `small` measured 5.04 M) |
-| `--steps`, `--batch-size` | 100000, 64 | optimiser steps, samples per step |
-| `--lr`, `--warmup`, `--weight-decay`, `--clip`, `--dropout` | 5e-4, 2000, 0.01, 1.0, 0.1 | AdamW (betas 0.9 / 0.98), linear warm-up, cosine decay to 5 % of `--lr` |
-| `--task-probs` | `A=0.35,B=0.25,C=0.20,D=0.20` | share of samples per pretext task |
-| `--task-weights` | `A=1,B=1,C=1,D=1` | loss weight per task |
-| `--ghost-edge-mode` | `relational` | `relational` / `topology` / `none`, see [leakage controls](#leakage-controls-what-makes-the-tasks-non-trivial) |
-| `--p-cell`, `--p-group` | 0.15, 0.15 | masking probability of a (car, channel) cell (task A) / (car, group) cell (task D) |
-| `--flag-oversample` | 5 | sampling weight of frames with a flag on track |
-| `--yellow-pos-weight`, `--global-pos-weight` | 20, 3 | BCE positive weights for task C |
-| `--select-tasks` | `ABD` | `best.pt` = lowest mean validation loss over these tasks (C is noisy: few flag events) |
-| `--val-frac`, `--embargo-s`, `--block-s` | 0.1, 60, 180 | validation split, see [training details](#training-details) |
-| `--eval-every`, `--eval-frames`, `--save-every`, `--log-every` | 2000, 512, 5000, 50 | evaluation / checkpoint / log intervals; size of the fixed validation subset |
-| `--workers`, `--device`, `--amp`, `--seed`, `--resume` | 0, cuda if available, off, 0, none | DataLoader workers, device, bfloat16 autocast, RNG seed, checkpoint to continue from |
-
-**Long runs.** Keep the process alive after logging out and raise the open-file limit (the memory maps of ~150 races):
-
-```bash
-nohup bash -c "source .venv/bin/activate && ulimit -n 65536 && python -m f1strategy.pretrain.train --cache cache --out runs/pre1 --preset small --batch-size 64 --amp --workers 8" > runs/logs/train_pre1.log 2>&1 &
-ps aux | grep f1strategy
-python tests/visualize_training.py        # parses train.log, writes runs/bert_pretraining_metrics.png
-```
-
-**Benchmark** (time of one step split into mask / forward / backward, with optional op profile and peak GPU memory):
-
-```bash
-# Outdated:
-python -m f1strategy.pretrain.bench --cache cache --batch-size 64 --amp --profile
-# Current:
-python -m f1strategy.seqbert.bench --cache cache --batch-sizes 2 4 8
-python -m f1strategy.seqbert.bench --cache cache --batch-sizes 2 4 8 --amp --probe --scales long --encoders gnn
-```
-
-## Model
-
-The following section is outdated, see [Temporal (sequence) pre-training](#temporal-sequence-pre-training)
-
-One token per snapshot element: `[GLOBAL] + 22 driver slots + 128 track tokens` (151 tokens; the 10 m ring is pooled to a fixed
-128 tokens whatever the circuit, so a token is a fixed *fraction of the lap* and circuits share one position vocabulary).
-
-* **Separate input projections** for global (2 x 23 inputs), driver (2 x 42) and track tokens (18 static features, 6 flag
-  bits and their visibility, car count), a token-type embedding, and a **ring-position embedding shared by cars and track**:
-  a car gets the embedding of the track token it is on. A learnable "unknown position" is used when a car's location is
-  hidden, and a learnable ghost embedding marks the masked car in the ghost-car task.
-* **BERT encoder** (bidirectional, pre-LN, GELU, scaled-dot-product attention). Driver slots carry no order or identity
-  (slot = alphabetical code in that race), so the encoder is permutation-equivariant over cars (tested).
-* **Graph structure as a learned additive attention bias** per layer and head: circular ring-distance buckets between
-  tokens (T5-style: exact below 16 tokens, logarithmic above, 24 buckets, plus a bucket for the global token and one for
-  unknown positions), and the proximity-edge features of every car pair through a small MLP and one linear map per layer.
-  Absent cars are masked as attention keys.
-* **Inputs are `[value * visible, visible]`**, never a silently zeroed value; missing data (Parquet nulls) is "not visible".
-* **Heads (pre-training):** a driver head (all 42 driver features, compound as 6 logits), a flag
-  head (yellow / double yellow per track token) and a global head (all 23 global features). `F1Bert.encode` returns the hidden
-  states `[B, 151, hidden]` that fine-tuning would use.
-* Embedding lookups and the distance bias are written as broadcasts and one-hot matmuls: their backward pass is a dense
-  reduction, whereas an index-based backward accumulated a huge number of indices into very few rows and was ~45x slower
-  than the forward pass on the GPU.
-
-## The pretext tasks
-
-Every sample in a batch is assigned one task (default shares A 35 % / B 25 % / C 20 % / D 20 %), so each loss stays clean and
-each task's leakage is controlled on its own.
-
-| | Task | What is hidden | Predicted |
-|---|---|---|---|
-| **A** | Telemetry value regression | 15 % of the (car, channel) cells of `speed_kmh`, `throttle`, `brake`, `rpm` | the hidden values (`brake` is 0/1, so BCE instead of regression) |
-| **B** | Ghost car | **all** features of one random car; the other cars and proximity edges stay | every feature of that car, incl. tyre compound (cross-entropy) |
-| **C** | Flag / marshal-sector condition | *global mode* (50 %): all flag bits on all track tokens + all global status flags. *local mode*: yellow / double yellow on a few marshal sectors (each picked with p = 0.3, flagged ones with p = 0.7) | yellow / double yellow per track token, `is_yellow/sc/vsc/red/...` from the global token |
-| **D** | Strategy state | 15 % of the (car, group) cells of: compound; tyre age / stint / stops / fresh; pace; gaps + position | the hidden values; this is the signal later fine-tuning for undercut / overcut needs |
-
-### Leakage controls (what makes the tasks non-trivial)
-
-Several inputs restate each other; hiding only the target would turn a task into a copy. Everything below is enforced in
-`masking.py` and covered by `tests/pretrain/`.
-
-* **speed -> `vx_mps`, `vy_mps` are hidden with it**: for a car on track `|v|` is 0.96 x speed (corr. 0.85 on the 2019 Australian GP).
-* **Edge features restating a hidden car feature are hidden on every edge touching that car**: `rel_speed_kmh` (speed), and
-  `gap_s`, `order_neighbor`, `drs_window` (gaps / position).
-* **Flags**: the track flag bits (`flag_sc` etc. equal the global status), the global status flags and `drs_enabled` (switched off
-  under SC) are hidden together; in local mode `is_yellow`, `is_green`, `n_yellow_sectors` are hidden too, since they reveal
-  whether a masked sector is flagged.
-* **Ghost car `ghost_edge_mode`**: `relational` (default: edges stay visible, only `rel_speed_kmh` and the car's own
-  features are hidden), `topology` (edge existence only; ring position hidden too) or `none`. In `relational` mode the ghost's
-  gaps/progress are largely derivable from its neighbours' edges, so `topology` is the harder, more informative variant.
-* A test overwrites every hidden cell with garbage and requires bit-identical encoder output.
-
-Known soft leak, left in on purpose: a car's time gap divided into the progress difference gives a smoothed speed over the last
-seconds. That is genuine context, not a copy; hide the gap features together with speed if you want to remove it.
-
-## Training details
-
-* **Loss:** Huber (delta 1) for continuous features, BCE for binary ones, cross-entropy for the tyre compound; flags use
-  `pos_weight` (yellow 20, global flags 3 by default; the first run used yellow 5). Each task's loss is averaged over its own
-  target cells, then summed with `--task-weights`.
-* **Flagged frames are oversampled** (`--flag-oversample`, default 5x, first run 2x) through a `WeightedRandomSampler`: flags are
-  ~1 % of frames, but they are all of task C.
-* **Validation never splits frames of the same race randomly** (neighbours are near duplicates): whole races are held out when
-  >= 5 are available (first run: 15 of 150, drawn with seed 0), else every 10th 180 s block of each race with a 60 s embargo
-  on both sides (interleaved, not cut from the end: the last laps have progress / tyre-age values never seen in training,
-  which would make validation an extrapolation test).
-* **Fixed validation subset and masks:** `--eval-frames` frames (half of them flagged, if there are enough) are evaluated
-  every `--eval-every` steps with *every* task forced in turn and the same masks each time (generator seeded per task), so
-  evaluations are comparable. Metrics are reported in physical units next to a predict-the-batch-mean baseline (e.g.
-  `val/A_speed_kmh_mae` vs `..._baseline`).
-* **Optimiser:** AdamW (betas 0.9 / 0.98), linear warm-up then cosine decay to 5 % of the peak rate, gradient clipping at 1,
-  optional bfloat16 autocast (`--amp`).
-* **Checkpoints:** `last.pt` every `--save-every` steps and `best.pt` whenever the mean validation loss over `--select-tasks`
-  (default `ABD`) improves; both hold weights, optimiser state, config, arguments and the feature schema. `log.jsonl` gets one
-  line per `--log-every` steps and per evaluation (appended on resume).
-* **Data notes:** statistics are fixed physical scales, not fitted, so a new race needs no refit. The cache keeps every 5th
-  frame (2 Hz). Driver slots are padded to 22 and marshal sectors to 40; the cache builder fails loudly if the manifest
-  schema changes.
-
-## Results of the first run
-
-Setup: 150 race caches (2019-2025) at 2 Hz, `small` preset (5.04 M parameters), 1,565,657 training frames, 15 held-out
-races (168,723 frames, of which 512 are evaluated), batch 64, bf16, one CUDA GPU at ~1 s/step. The log shows the run was
-restarted once: it was resumed from the step-15,000 checkpoint with the settings above and trained to step 35,000
-(about 6 hours for those 20,000 steps).
-
-<p align="center">
-  <img src="docs/images/pretraining-metrics.png" alt="Training loss, per-task losses, validation losses, learning rate and gradient norm of the first pre-training run" width="560"><br>
-  <em>Produced by <code>tests/visualize_training.py</code> from <code>train.log</code>, i.e. the resumed segment (steps 15,050-35,000):
-  total and validation loss, the four task losses, learning rate and gradient norm.</em>
-</p>
-
-Validation metrics on the held-out races (fixed masks; lower is better unless marked). The baseline predicts the mean of the
-targets in the batch, so it is a deliberately easy bar:
-
-| Task | Metric | Baseline | Step 22,000 (`best.pt`) | Step 35,000 (`last.pt`) |
-|---|---|---|---|---|
-| A | speed MAE (km/h) | 63.4 | 13.3 | 11.5 |
-| A | throttle MAE (%) | 37.0 | 12.0 | 10.8 |
-| A | RPM MAE | 2,310 | 675 | 651 |
-| A | brake accuracy (higher is better) | 0.711 | 0.911 | 0.914 |
-| B | ghost car: position MAE (places) | 4.95 | 1.56 | 1.42 |
-| B | ghost car: speed MAE (km/h) | 66.1 | 39.2 | 34.8 |
-| B | ghost car: tyre-age MAE (laps) | 7.74 | 5.18 | 4.90 |
-| B | ghost car: compound accuracy | - | 0.691 | 0.690 |
-| D | position MAE (places) | 4.82 | 1.39 | 1.29 |
-| D | pace MAE (s) | 1.77 | 0.77 | 0.73 |
-| D | tyre-age MAE (laps) | 7.89 | 4.58 | 4.42 |
-| D | compound accuracy | - | 0.759 | 0.723 |
-| C | yellow-token recall / precision (local mode) | - | 0.030 / 0.099 | 0.018 / 0.060 |
-| C | SC / VSC recall (global mode) | - | 0.83 / 0.85 | 0.65 / 0.80 |
-
-How to read it, honestly:
-
-* **A, B and D clearly learn** something beyond the mean: speed, throttle, RPM, race position, pace and tyre age are
-  recovered with a fraction of the baseline error, and a hidden car's race position is placed within about 1.4 places.
-* **Task C is the weak spot.** Training loss for C reaches ~0.01, but the validation loss is ~0.8, and sector-level yellow flags
-  are almost never found (recall 2-3 %). Safety-car and VSC states are recovered much better. Flag events are rare and
-  validation is evaluated on only 512 frames (half of them flagged), so the C numbers are noisy.
-* **Over-fitting starts after about step 22,000.** The training loss keeps falling (total ~0.22 at step 15,000, ~0.15 at 35,000)
-  while the validation selection loss (tasks A, B, D) is lowest at step 22,000 (0.0854) and rises to 0.0956 by step 35,000, driven
-  by task D (0.126 -> 0.158); A and B still improve. `best.pt` is therefore the better checkpoint to start from. More
-  regularisation or more varied data is the obvious next experiment (see the untested options above).
-* One run, one seed, a small fixed evaluation subset: differences of a few percent between rows are within noise.
-
-## Using the checkpoint
-
-```python
-from f1strategy.pretrain.model import load_encoder
-
-enc = load_encoder("runs/pre1/best.pt", device="cpu")  # rebuilds F1Bert from the stored config
-enc.encode(masked_batch)  # hidden states [B, 151, hidden]
-```
-
-`encode` takes a `MaskedBatch` (see `pretrain/masking.py`). There is no helper yet that builds one with *everything visible*
-for plain inference or fine-tuning; writing it (a `Masker` pass that hides nothing) is the first step towards a downstream task.
-`runs/pre1/best.pt` and `last.pt` are about 60 MB each because they also store the optimiser state.
-
-## Pre-training limitations
-
-* No fine-tuning, no downstream heads or labels yet.
-* **Single snapshots only** (this model; the [temporal model](#temporal-sequence-pre-training) addresses it): no temporal context across frames. Stacking a window of snapshots is the natural next step, and
-  the data (10 Hz Parquet, `RaceSequence.windows`) already supports it.
-* Driver identity / team is not an input (slots are arbitrary per race), so the encoder cannot learn driver-specific behaviour yet.
-* Task C needs flag events in the training data; a race with no SC/VSC contributes only yellow-sector signal, and the results
-  above show that local yellow flags are not learned well so far.
-* The cache keeps 2 Hz; 10 Hz is interpolated and redundant for these tasks, but short transients (a lock-up, a flag lasting a
-  few seconds) can fall between kept frames.
-* Validation uses 512 frames of 15 races and one seed; use `--eval-frames 2048` or more before drawing fine conclusions.
-
 ## Temporal (sequence) pre-training
 
-`src/f1strategy/seqbert/` is the second pre-training model. The first one ([above](#self-supervised-pre-training)) encodes
+`src/f1strategy/seqbert/` is the second pre-training model. The first one ([archived below](#archived-the-single-snapshot-model)) encoded
 **one snapshot**: its tokens are the nodes of one graph, so attention runs over *space* and the model never sees how a race
 moves. The temporal model turns each snapshot into **one vector** and runs a standard BERT encoder over a *sequence of such
 vectors*, so attention runs over **time**. It reuses the schema, the caches and `RaceCache` of the first model unchanged; the
-first model stays available for reproducing its results.
+code of the first model has been removed from the repository (its results are kept in the archive).
 
 <p align="center">
   <img src="docs/images/fig1_architecture.png" alt="Pipeline of the temporal model: sequence of graphs, graph to vector, temporal BERT encoder, heads" width="900"><br>
@@ -988,8 +781,9 @@ Because the rounding is to whole frames the realised window is slightly differen
 for one lap here). The token counts are a trade-off between temporal resolution and memory: the graph encoder processes
 `batch x tokens` frames per step and the transformer adds a `T x T` attention per sample, so the long scale is the one to
 size carefully (see [measured cost](#measured-cost-and-the-benchmark)). Override a scale with `--n-tokens`, `--span-s` or
-`--span-laps`; one scale is trained per run (`--scale`). The model has a learned *scale embedding* so that one network could
-later be trained on mixed scales, but the training script does not do that yet.
+`--span-laps` (a single value for a single-scale run, `short=20,long=96` per scale in a mixed run). A run trains one scale
+(`--scale short`) or all of them at once (`--scale mixed`, see [Training the temporal model](#training-the-temporal-model)):
+the model has a learned *scale embedding* and an optional elapsed-time embedding for that.
 
 ### Windows and the validation split
 
@@ -1051,6 +845,13 @@ steps' vectors do not depend on anything in the masked frames (the graph encoder
 The graph encoder still runs on the masked frames (their output is discarded); skipping them is an easy saving that has not
 been done.
 
+**One model for several scales.** The same weights read windows of 20, 96 and 192 tokens: attention works on any length (unusable
+frames are padding keys), the learned time positions cover up to 256 tokens, and a learned *scale embedding* tells the model which
+of the three it is looking at. A token means 0.5 s, about 1 s or about 4.5 s depending on the scale, and token index `i` therefore
+means a different time; the optional `--time-embed` (config `time_embed`) adds a sin / cos embedding of the *elapsed seconds* since the
+first token of the window (12 log-spaced periods from 2 s to 4000 s), so the same wall-clock distance looks the same at every scale.
+It adds one linear layer and is off by default, so older checkpoints still load.
+
 ### The temporal pretext tasks
 
 Tasks A (telemetry cells) and C (flags) of the snapshot model are not used here. Every sample of a batch gets exactly one task
@@ -1082,7 +883,7 @@ contributes nothing to the loss.
 ### Temporal leakage controls
 
 The leak maps of the snapshot model carry over (`pretrain/schema.py`), applied per frame and over the whole window; `seqbert`
-adds the rules for a hidden car across time. Everything is enforced in `seqbert/masking.py` and covered by `tests/seqbert/`.
+adds the rules for a hidden car across time. Everything is enforced in `seqbert/masking.py` and covered by `tests/pretrain/`.
 
 * **Whole-car masks (B, P):** all features of the car are hidden. On every proximity edge touching a hidden car the edge
   features that restate its speed (`rel_speed_kmh`) and its gaps / position (`gap_s`, `order_neighbor`, `drs_window`) are hidden.
@@ -1140,7 +941,7 @@ different years must be close.
   (from different races, i.e. years, when the group has them). The two windows are the positive pair; all other windows in the
   batch are negatives.
 * **Loss.** NT-Xent over the 2P `[CLS]` projections (MLP to 64 dims) at `--temperature` 0.1, weighted by `--contrast-weight`.
-  Both views get 15 % random vector dropout.
+  Both views get 15 % random vector dropout. In a mixed run the pairs of a contrastive step are drawn within the scale of that step.
 * **Caveats.** It is only meaningful with several races and years; on a single race it degenerates to "nearby windows of the
   same race". A phase bin of 10 % is coarse for the short scale (many different moments share a bin), so for `short` use more
   bins; for `medium` and `long` a bin is a good "stage of the race".
@@ -1148,70 +949,115 @@ different years must be close.
 ### Training the temporal model
 
 ```bash
-# 1) the cache is the one of the snapshot model (stride 5 = 2 Hz)
+# 1) the cache (stride 5 = 2 Hz) is shared with every other consumer of the training schema
 python -m f1strategy.pretrain.cache --src parquet_datasets --dst cache --stride 5
 
 # 2) what can this machine carry? (time per step, parameters; peak GPU memory on CUDA)
-python -m f1strategy.seqbert.bench --cache cache --scales short medium long --encoders flatten sector gnn --batch-sizes 2 4 8 --preset small
-python -m f1strategy.seqbert.bench --cache cache --scales long --encoders sector --probe          # largest batch that fits
-python -m f1strategy.seqbert.bench --cache cache --batch-sizes 2 4 8 --amp --probe --scales long --encoders gnn
+python -m f1strategy.seqbert.bench --cache cache --scales short medium long --encoders gnn --probe --preset base
 
-# 3) train one scale per run
-python -m f1strategy.seqbert.train --cache cache --out runs/seq_short  --scale short  --graph-encoder flatten --p-contrast 0.1 --amp
-python -m f1strategy.seqbert.train --cache cache --out runs/seq_medium --scale medium --graph-encoder sector  --batch-size 16 --amp
-python -m f1strategy.seqbert.train --cache cache --out runs/seq_long   --scale long   --graph-encoder sector  --batch-size 4  --amp
+# 3) all three scales at once: ONE run, one model; every step draws one scale and uses that scale's batch size
+python -m f1strategy.seqbert.train --cache cache --out runs/mixed_gnn --scale mixed --graph-encoder gnn --preset base \
+    --batch-sizes short=128,medium=32,long=16 --scale-probs short=0.55,medium=0.35,long=0.10 --time-embed \
+    --steps 30000 --lr 2e-4 --warmup 2000 --weight-decay 0.05 --dropout 0.15 \
+    --eval-every 1000 --eval-windows 128 --workers 12 --amp
 
-# 4) figures for a report or a supervisor
+# 3b) the alternative to compare against: a curriculum, one scale per run, each stage from the best weights of the previous one
+python -m f1strategy.seqbert.train --cache cache --out runs/short_gnn --scale short --graph-encoder gnn --preset base \
+    --batch-size 64 --steps 30000 --lr 2e-4 --warmup 2000 --weight-decay 0.05 --dropout 0.15 \
+    --eval-every 1000 --eval-windows 128 --workers 8 --amp
+python -m f1strategy.seqbert.train --cache cache --out runs/medium_gnn --scale medium --graph-encoder gnn --preset base \
+    --batch-size 32 --steps 12000 --lr 1e-4 --warmup 500 --weight-decay 0.05 --dropout 0.15 \
+    --eval-every 500 --eval-windows 128 --workers 8 --amp --init-from runs/short_gnn/best.pt
+python -m f1strategy.seqbert.train --cache cache --out runs/long_gnn --scale long --graph-encoder gnn --preset base \
+    --batch-size 16 --steps 3000 --lr 5e-5 --warmup 200 --weight-decay 0.05 --dropout 0.15 \
+    --eval-every 250 --eval-windows 128 --workers 8 --amp --init-from runs/medium_gnn/best.pt
+
+# 4) continue an interrupted run (weights, optimiser, step and learning-rate schedule)
+python -m f1strategy.seqbert.train ...same arguments... --resume runs/mixed_gnn/ckpt.pt
+
+# 5) figures and plots, tests
 python -m f1strategy.seqbert.visualize --cache cache --out figures
-python .\tests\visualize_training_loss.py --log .\runs\pre2\log.jsonl
-
-# 5) tests
-python -m pytest tests/seqbert
+python tests/visualize_training_loss.py --log runs/short_gnn/log.jsonl
+python -m pytest tests/pretrain
 ```
 
 | Option | Default | Meaning |
 |---|---|---|
 | `--cache`, `--out` | required | cache directory and run directory |
-| `--scale` | `short` | `short` / `medium` / `long` (10 s / 1 lap / 10 laps) |
-| `--n-tokens`, `--span-s`, `--span-laps` | scale default | override the number of tokens or the window length |
-| `--graph-encoder` | `flatten` | `flatten` / `sector` / `gnn`, see [Step I](#step-i-graph-to-vector) |
+| `--scale` | `short` | `short` / `medium` / `long` (10 s / 1 lap / 10 laps), or `mixed` = several scales at once in one model |
+| `--scales` | `short,medium,long` | the scales of a `--scale mixed` run |
+| `--scale-probs` | `short=0.5,medium=0.35,long=0.15` | mixed: share of the steps per scale (normalised; every scale must be listed). `long` has only ~3,000 windows, so it gets the smallest share |
+| `--batch-sizes` | `short=128,medium=32,long=16` | mixed: batch size per scale (about 3,000 frames per step each; `--batch-size` sets the same size for every scale). A single-scale run uses `--batch-size` |
+| `--n-tokens`, `--span-s`, `--span-laps` | scale default | override the number of tokens or the window length: one value, or `short=20,long=96` per scale |
+| `--time-embed` | off | add an embedding of the elapsed seconds (recommended for mixed runs, see [the temporal BERT](#the-temporal-bert)) |
+| `--graph-encoder` | `flatten` | `flatten` / `sector` / `gnn`, see [Step I](#step-i-graph-to-vector) (`gnn` was clearly best, see [results](#results-so-far-and-status)) |
 | `--preset` | `small` | `tiny` / `small` / `base`, see [the temporal BERT](#the-temporal-bert) |
 | `--steps`, `--batch-size` | 2000, 32 / 16 / 8 | optimiser steps; samples per step (default by scale: short / medium / long) |
-| `--lr`, `--warmup`, `--weight-decay`, `--grad-clip` | 3e-4, 100, 0.01, 1.0 | AdamW (betas 0.9 / 0.98), linear warm-up, cosine decay to 0 |
-| `--amp`, `--device`, `--workers`, `--seed` | off, auto, 2, 0 | bf16 autocast, device, DataLoader workers, RNG seed |
+| `--lr`, `--warmup`, `--weight-decay`, `--grad-clip` | 3e-4, 100, 0.01, 1.0 | AdamW (betas 0.9 / 0.98), linear warm-up, cosine decay to 0. **5e-4 was too high** (see [results](#results-so-far-and-status)) |
+| `--dropout` | 0.1 | dropout of the temporal encoder |
+| `--resume`, `--init-from` | none | `--resume ckpt.pt` continues a run exactly; `--init-from best.pt` starts from the weights only (new optimiser, step 0), used for the next scale |
+| `--amp`, `--device`, `--workers`, `--seed` | off, auto, 2, 0 | bf16 autocast, device, DataLoader workers, RNG seed (the same seed gives the same validation races) |
 | `--task-probs` | `B=0.25,T=0.25,P=0.25,Z=0.25` | share of samples per task (normalised) |
 | `--zone-frac`, `--zone-position`, `--mask-fill` | 0.35, `middle`, `alt` | task Z: masked share, where, dummy vector (`alt` = -0.1/+0.1, `zero`) |
 | `--pit-window` | `18,24` | task P: seconds behind the reference car |
 | `--ghost-edge-mode`, `--pit-edge-mode` | `relational`, `topology` | edge visibility around hidden cars, see [leakage controls](#temporal-leakage-controls) |
 | `--loss-kind`, `--cos-weight` | `mse`, 0 | `mse` / `huber` / `cosine`; weight of an extra cosine term |
+| `--loss-norm` | `none` | `feature`: divide every column's error by the variance of its targets, so slowly varying quantities (position, tyre age, compound) count as much as noisy telemetry. Untested at scale; a one-race check showed no clear effect |
 | `--p-contrast`, `--pairs`, `--phase-bins`, `--temperature`, `--contrast-weight` | 0, 8, 10, 0.1, 1.0 | contrastive steps, see [above](#contrastive-objective) |
 | `--val-frac`, `--block-s` | 0.1, 180 | validation share; block length (seconds) of the few-races split |
 | `--eval-every`, `--eval-windows` | 250, 64 | evaluation interval; validation windows per task |
+| `--select-tasks` | `BTPZ` | `best.pt` = lowest mean validation MSE (normalised units) over these tasks |
 
-Files in `--out`: `args.json` (all arguments, model config, validation description), `log.jsonl` (one line per step, with the
-per-task losses, `top1` for contrastive steps and an `eval` entry at evaluation steps; appended to, never overwritten) and
-`ckpt.pt` (weights, model config, scale, number of tokens, step). `ckpt.pt` is rewritten at every evaluation and at the last, 
-while `best.pt` has the best overall score
-step: no optimiser state and no `--resume` yet. Keep the process alive and raise the file limit for long
-runs exactly as for the snapshot model (`nohup bash -c "ulimit -n 65536 && python -m f1strategy.seqbert.train ..."`).
+Files in `--out`: `args.json` (all arguments, model config, validation races), `log.jsonl` (one line per step with the per-task
+losses, `grad_norm`, `top1` for contrastive steps and an `eval` entry plus `val_loss` / `best_val` / `is_best` at evaluation
+steps; appended to, never overwritten), `best.pt` (the weights at the best validation loss: use this one for the next stage and
+for fine-tuning) and `ckpt.pt` (the latest evaluation point with the optimiser state, for `--resume`). A step whose gradient is
+not finite is skipped and reported. The console prints the baselines next to the metrics (`*_mean`, `*_interp`,
+`*_majority_acc`). Keep the process alive and raise the file limit for long runs
+(`nohup bash -c "ulimit -n 65536 && python -m f1strategy.seqbert.train ..." > run.log 2>&1 &`).
+
+**Mixed runs (`--scale mixed`).** A batch needs a single sequence length, so every step draws *one* scale with probability
+`--scale-probs`, takes a batch of that scale's size from its own data stream and passes that scale's id to the model; all three
+share every weight. The validation split uses the same held-out races for all scales. At every evaluation each scale is
+evaluated on its own (`log.jsonl` keys and console lines are prefixed `short/`, `medium/`, `long/`, e.g. `medium/Z/mse`),
+`val_loss` is the **mean over the scales** of the per-scale validation loss (`val_loss_by_scale` has the parts) and selects
+`best.pt`; in addition `best_short.pt`, `best_medium.pt` and `best_long.pt` keep the best point of each scale, because the mean can
+hide a scale's optimum. The step log carries the `scale` of every step and the workers (`--workers`) are shared between the
+scales. Checkpoints store `scale: "mixed"` and the token count per scale in `scales`.
+
+**If a run goes bad.** Watch `gnorm` in the log. A sudden rise of the training loss that never recovers is an optimiser
+instability (see [results](#results-so-far-and-status)): stop, then restart from `best.pt` with `--init-from` and a lower
+`--lr`; `ckpt.pt` is the latest point, which may already be after the spike.
+
+**Which length to train on.** The three scales differ in what they teach and in how much data they have (149 races): short
+310,185 training windows, medium 34,549, long 3,054. *Short* teaches the graph encoder and the dynamics (most data, the zone
+baseline is meaningful), *medium* (one lap) is the strategy scale, *long* only adds stint-level context and has too few windows to
+carry a model alone. The supervisor's design is to train **all three at once** (`--scale mixed`): one checkpoint that reads every
+horizon, with the abundant short windows regularising the rare long ones. The main run is therefore the mixed one, with
+`--time-embed` and a small share for `long` (about 10 %, 3,000 windows are seen many times over). Whether mixing beats the
+curriculum (short, then medium, then long, with `--init-from`) is **not known yet**: compare the per-scale `best_<scale>.pt` of the mixed
+run with the single-scale checkpoints at the same scale, and read the interpolation / mean / majority baselines in the same log.
 
 ### Measured cost and the benchmark
 
 `seqbert.bench` times one full training step (masking, forward, backward, optimiser) for every combination of scale, encoder
-and batch size, and `--probe` doubles the batch size until it no longer fits (CUDA out-of-memory) or a step takes more than
-30 s. On CUDA it reports torch's peak allocated memory; on CPU only the process high-water mark, which is not comparable
-between rows. **Run it on the target GPU before choosing batch sizes.** The only numbers measured so far are from a CPU-only
-sandbox (one core, `small` preset, batch size 2, one race), useful for *relative* cost only:
+and batch size on one fixed batch, so data loading is **not** included; `--probe` doubles the batch size until it no longer
+fits (CUDA out-of-memory) or a step takes more than 30 s. On CUDA it reports torch's peak allocated memory; on CPU only the
+process high-water mark, which is not comparable between rows. Measured on the author's GPU, `base` preset (16.39 M
+parameters), GNN encoder, fp32:
 
-| Scale | Tokens | Encoder | Frames per step | Parameters | s per step (1 CPU core) |
+| Scale | Tokens | Batch | Frames per step | s per step | Peak memory (MB) |
 |---|---|---|---|---|---|
-| short | 20 | flatten / sector / gnn | 40 | 8.33 / 5.76 / 6.27 M | 0.11 / 0.08 / 0.16 |
-| medium | 96 | flatten / sector / gnn | 192 | same | 0.20 / 0.21 / 0.53 |
-| long | 192 | flatten / sector / gnn | 384 | same | 0.40 / 0.32 / 1.09 |
+| short | 20 | 64 / 128 / 256 | 1,280 / 2,560 / 5,120 | 0.06 / 0.09 / 0.15 | 1,834 / 3,387 / 6,498 |
+| medium | 96 | 16 / 32 / 64 / 128 | 1,536 / 3,072 / 6,144 / 12,288 | 0.06 / 0.10 / 0.18 / 0.43 | 2,132 / 3,981 / 7,680 / 15,059 |
+| long | 192 | 8 / 16 / 32 / 64 | 1,536 / 3,072 / 6,144 / 12,288 | 0.06 / 0.10 / 0.18 / 0.35 | 2,132 / 3,976 / 7,667 / 15,051 |
 
-The graph encoder dominates at these sizes (cost ~ frames per step; `gnn` ~ 2.5-3x `flatten`). Attention over time is
-`T x T` per sample and layer, so at `long` (192 tokens) it is still small; it would only become the bottleneck for a much
-larger `--n-tokens` (a 1,800-token "10 laps at 0.5 s" window would be ~90x the attention cost of 192 tokens).
+Largest batch that fit: 256 (short), 128 (medium), 64 (long). Memory grows linearly with `batch x tokens` (about 1.2 MB per
+frame for the GNN), so the same number of frames costs the same at every scale. The other encoders are cheaper (`small`
+preset, fp32, `long`, batch 8: 0.4 GB `sector`, 0.5 GB `flatten`, 1.8 GB `gnn`), but in time all three are within a factor of two
+on a GPU: the step is launch-bound at small batch sizes (0.03-0.07 s regardless of batch). **In real runs the step takes about
+0.085 s at every scale, i.e. data loading is the bottleneck**, not the GPU: use `--workers 8` or more. Attention over time is
+`T x T` per sample and layer, so at 192 tokens it is small; a 1,800-token "10 laps at 0.5 s" window would cost ~90x more.
 
 ### Figures for reports
 
@@ -1227,7 +1073,7 @@ three vectorisations), `fig3_sequence.png` (a 10 s sequence of eight frames with
 
 ### Using a temporal checkpoint
 
-There is no `load_encoder` helper for the temporal model yet. A checkpoint is rebuilt like this, with *everything visible*
+There is no `load_encoder` helper for the temporal model yet. A checkpoint (`best.pt` or `ckpt.pt`) is rebuilt like this, with *everything visible*
 (`SeqMasker.plain` with no token dropout), which is the input a fine-tuning head would see:
 
 ```python
@@ -1237,11 +1083,12 @@ from f1strategy.seqbert.config import SCALES
 from f1strategy.seqbert.masking import SeqMasker
 from f1strategy.seqbert.model import SeqBertConfig, SeqF1Bert
 
-ck = torch.load("runs/seq_short/ckpt.pt", map_location="cpu")
+ck = torch.load("runs/short_gnn/best.pt", map_location="cpu")
 model = SeqF1Bert(SeqBertConfig(**ck["cfg"])).eval()
 model.load_state_dict(ck["model"])
 
-scale = SCALES[ck["scale"]]
+name = ck["scale"] if ck["scale"] != "mixed" else "medium"       # a mixed checkpoint reads every scale: pick yours
+scale = SCALES[name]
 ix = D.WindowIndex(D.open_races("cache"), scale)
 raw = torch.utils.data.default_collate([D.WindowDataset(ix)[0]])       # one window
 mb = SeqMasker().plain(raw, token_dropout=0.0)                         # nothing masked
@@ -1249,50 +1096,242 @@ h = model.encode(mb, scale.scale_id)                                   # [B, 1 +
 ```
 
 If the checkpoint was trained with `--n-tokens`, `--span-s` or `--span-laps`, build the same scale (`dataclasses.replace`) before
-making the windows. `h[:, 0]` summarises the sequence; `h[:, 1:]` are the time-contextualised graph vectors.
+making the windows. A mixed checkpoint (`ck["scale"] == "mixed"`, token counts in `ck["scales"]`) works at each of its scales; use
+the one you fine-tune on (and `best_<scale>.pt` for that scale). `h[:, 0]` summarises the sequence; `h[:, 1:]` are the time-contextualised graph vectors.
 
-### Status and limitations of the temporal model
+### Results so far and status
 
-**What has been run.** The code is covered by 13 offline tests (`tests/seqbert`, on the synthetic session) and was exercised on
-the 2019 Australian GP cache on a CPU: all three scales and all three graph encoders train, evaluate and write checkpoints.
-**No full-corpus run exists yet, so there are no trained-model results to report.** The only learning check is a smoke test
-(`tiny` preset, `flatten`, one race, 600 steps at batch size 16, 15 % contrastive steps; validation = interleaved blocks of the
-*same race*, so it is optimistic):
+**What has been run.** The code is covered by the offline tests in `tests/pretrain` (cache, race-cache readers, windows, task
+masks and leakage, encoders, contrastive objective, benchmark, training CLI with resume / init-from / non-finite gradient /
+every option) and has been trained on the real corpus: 149 races (2019-2025), whole-race hold-out of 15 races. Four experiments
+exist; the numbers below are validation numbers on held-out races, compared with the baselines in the same log.
 
-| Metric (validation, fixed masks) | Model | Baseline |
-|---|---|---|
-| T: compound accuracy | 0.92 | 0.46 (majority class) |
-| T: tyre-age MAE (laps) | 4.8 | 6.5 (batch mean) |
-| B: ghost-car position MAE (places) | 1.6 | - |
-| B: ghost-car speed MAE (km/h) | 55.8 | 61.1 (batch mean) |
-| Z: speed MAE across the masked block (km/h) | 54.5 | 68.3 (mean); **18.3 (linear interpolation)** |
-| P: gap-to-leader MAE of hidden cars (s) | 22.0 | **17.0 (batch mean)** |
-| K: partner retrieval among 16 views (chance 0.07) | 0.4-0.9, noisy | - |
+**1. First run (`sector` encoder, `long` scale, 2,000 steps at batch 4): no learning.** It saw 8,000 windows (about 0.5 % of
+what the snapshot model saw) and every task was at baseline level (e.g. tyre-compound accuracy 0.32 against 0.67 for always
+guessing the majority class). It proved that the pipeline runs end to end at the 10-lap scale, nothing more.
 
-Read it honestly: the tyre task and the contrastive objective learn quickly; the zone task does **not** yet beat linear
-interpolation and the pit-return task is still worse than predicting the mean gap, which is expected after 600 steps of a
-0.5 M-parameter model on one race, and says nothing about a `small` model on the full corpus. Compare against the `*_mean`,
-`*_interp` and `*_majority_acc` entries of the log before trusting any task.
+**2. Encoder comparison (`small` preset, `short` scale, 20,000 steps at batch 64, learning rate 5e-4).** At each run's best
+checkpoint (the validation loss is the mean MSE of the four tasks in normalised units):
 
-**Limitations and open points**
+| | flatten | sector | **gnn** | baseline |
+|---|---|---|---|---|
+| best step | 7,000 | 10,000 | 7,000 | |
+| validation loss | 0.169 | 0.142 | **0.105** | |
+| B ghost car: position MAE (places) | 4.6 | 4.3 | **2.9** | 5.1 (mean) |
+| B ghost car: speed MAE (km/h) | 67 | 55 | **42** | 84 (mean) |
+| T tyre set: compound accuracy | 0.59 | 0.64 | **0.67** | 0.41 (majority class) |
+| T tyre set: tyre-age MAE (laps) | 6.8 | 6.3 | **6.0** | 9.3 (mean) |
+| P pit-return window: gap MAE (s) | 20.6 | 24.2 | **16.6** | 24.3 (mean) |
+| P pit-return window: position MAE (places) | 3.1 | 2.9 | **2.4** | 3.2 (mean) |
+| Z zone: speed MAE (km/h) | 65 | 66 | 59 | **15.9 (interpolation)** |
 
-* **The 1-layer linear head is a bottleneck by design:** a `hidden`-dimensional vector must carry the whole frame (22 cars x 42
-  features, flags, global). If zone masking stays behind interpolation on the full corpus, a larger `hidden`, a better graph
-  encoder or a wider head is the first thing to try.
-* **Not permutation-equivariant, no identity:** the vector is slot-ordered (alphabetical code), unlike the snapshot model, and
-  no driver or team identity is an input.
+* **The GNN encoder is clearly the best** on every task and costs only ~18 % more time (1,405 s against 1,186 s for 20,000 steps).
+* **B, T and P beat their baselines with the GNN. Zone masking (Z) is not learned by any encoder**: it is far behind linear
+  interpolation (and on the slow quantities, position and tyre age, it stays at the mean-baseline level although interpolation
+  is almost exact).
+* **All three runs became unstable after about 8,000-11,000 steps** (the training loss jumped to about twice its value and never
+  recovered, in each run at a different step). This is an optimiser instability, not over-fitting (the *training* loss rose
+  too); the learning rate of 5e-4 was too high. The best checkpoints were saved before the jump, and everything after it was wasted.
+  Hence the recommended 2e-4 (with warm-up 2000), the gradient-norm logging and the skipping of non-finite steps.
+* A train / validation gap (GNN: training loss 0.056, validation 0.105 at the best step) shows some over-fitting to the training
+  races; hence the larger weight decay and dropout in the recommended recipe.
+
+**3. Scale tests (`base` preset, GNN, 1,000 steps each, final evaluation).**
+
+| | short (20 tokens) | medium (96) | long (192) | long, started from medium (5,000 steps) |
+|---|---|---|---|---|
+| training / validation windows | 310,185 / 34,127 | 34,549 / 3,582 | 3,054 / 328 | same as long |
+| validation loss | 0.149 | 0.1435 | 0.151 | **0.1285** (falling slowly, no spike) |
+| Z interpolation baseline: speed MAE (km/h) | 16.1 | 63.1 | 66.7 | 66.7 |
+| Z interpolation baseline: position MAE (places) | 0.01 | 0.04 | 0.29 | 0.29 |
+| Z model: position MAE (places) | 4.69 | 4.72 | 4.81 | 4.68 |
+| T compound accuracy (majority class) | 0.52 (0.47) | 0.55 (0.52) | 0.55 (0.62) | 0.64 (0.62) |
+| P gap MAE (s) | 21.2 | 22.7 | 16.1 | 16.7 |
+
+* **No scale is clearly easier to learn from this evidence:** after 1,000 steps the validation losses are within 0.008 of each
+  other (and the validation windows differ), and every run is still falling steeply. Short runs are 100x richer in data.
+* **The zone task changes meaning with the scale.** The masked block is 3.5 s at `short`, about 35 s at `medium` and about 5 minutes
+  at `long`, so linear interpolation stops being a meaningful baseline for speed above `short` (16 against 63-67 km/h) and Z
+  turns into forecasting. Only the slow quantities (position, tyre age, compound) can still be copied across the block, and
+  the model does not do that at any scale (position MAE 4.7 against 0.01-0.29): the open problem of the zone task.
+* **Curriculum works and is stable:** starting `long` from the best `medium` weights improved steadily for 5,000 steps (validation
+  loss 0.1525 to 0.1285) without any spike.
+* The first log version printed no `*_mean` baselines; this is fixed, so the comparison with the mean baseline at the long scale
+  is still outstanding (read it from the new logs).
+
+**4. Mixed-scale training is implemented and tested, but has not been run on the corpus yet.** A smoke run on
+one race trains all three scales together and writes the per-scale validation losses and best checkpoints. There are no
+results to report; the open questions are whether one model on three scales beats the curriculum, how large the share of `long`
+may be before it over-fits, and whether `--time-embed` helps.
+
+**Open points and limitations**
+
+* **The zone task (Z) is not learned**, in particular the slow per-car quantities. The 1-layer linear head has to read 22 cars x 42
+  features out of one `hidden`-dimensional vector per frame. Options: a larger `hidden`, `--loss-norm feature` (untested at
+  scale), a smaller `--zone-frac` as a curriculum, or a wider head. Until then Z should be read as a supporting task.
+* **A full-length run with the recommended recipe is still outstanding**; so are the base-versus-small comparison and the contrastive
+  objective at scale (`--p-contrast`, only checked on one race).
+* **Not permutation-equivariant, no identity:** the vector is slot-ordered (alphabetical code) and no driver or team identity is an input.
 * **The pit-return window is a masking task, not a pit-stop model.** It teaches the traffic behind a car; it does not model the
   pit stop itself, the lane time loss of a given circuit (18-24 s is a parameter) or what happens in the window afterwards.
-* **Temporal resolution:** the cache is 2 Hz; `medium` and `long` step 2 and 9 frames, so transients shorter than a token
-  (a lock-up, a short yellow) are invisible there. Time between tokens differs slightly per race; only the scale embedding
-  tells the model which scale it is looking at, there is no elapsed-time embedding.
-* **Contrastive learning** needs several races and years to mean anything; the circuit matching uses the curvature profile
-  and is untested on real cross-year data (the sample cache has one race).
-* **Training script gaps:** no `--resume`, no `best.pt` (the checkpoint is overwritten at every evaluation), no optimiser state,
-  no per-task loss weights, no mixed-scale training, no multi-GPU. The graph encoder runs on frames that task Z then discards.
-* **Memory is unmeasured on GPU.** The benchmark exists, the numbers do not (see above).
-* **Validation is optimistic with few races** (blocks of the same race); use whole-race hold-out (>= 5 races) for any claim.
+* **The gap-to-leader error in seconds** of task B is dominated by lapped cars (hundreds of seconds); judge B by position and speed.
+* **Temporal resolution:** the cache is 2 Hz; `medium` and `long` step 2 and 9 frames, so transients shorter than a token are
+  invisible there. Time between tokens differs slightly per race; only the scale embedding tells the model which scale it is
+  looking at, there is no elapsed-time embedding.
+* **Contrastive learning** needs several races and years to mean anything; the circuit matching uses the curvature profile and is
+  untested on real cross-year data.
+* **Training script gaps:** no per-task loss weights, no multi-GPU; the graph encoder runs on frames that
+  task Z then discards; `best.pt` has no optimiser state (continue from `ckpt.pt` with `--resume`, or start a new stage from `best.pt`).
+* **Mixed scales share one head:** the zone task means different things per scale (3.5 s, ~35 s, ~5 min masked), the three scales
+  have very different amounts of data, and one scale per step makes the gradient noisier than a single-scale run; the per-scale
+  validation and `best_<scale>.pt` exist to see whether one scale pays for the others.
 * **Position leak** (which rank is missing) is accepted, see [the leakage controls](#temporal-leakage-controls).
+
+## Archived: the single-snapshot model
+
+The first pre-training model encoded **one snapshot at a time**: its tokens were the 151 nodes of one graph (`[GLOBAL]`, 22 driver
+slots, 128 track tokens), so attention ran over space and never over time. It was replaced by the
+[temporal model](#temporal-sequence-pre-training), and its code (`pretrain/model.py`, `masking.py`, `losses.py`, `train.py`,
+`bench.py`) and tests were removed from the repository. `pretrain/schema.py`, `cache.py` and `data.py` remain because the
+temporal model reads the same caches. The description and the results of its one full run (35,000 steps on 150 races) are kept
+below as the baseline the temporal model is measured against and for the thesis. Its commands, options and checkpoint loader
+are no longer documented because they no longer run.
+
+### Model (snapshot model)
+
+One token per snapshot element: `[GLOBAL] + 22 driver slots + 128 track tokens` (151 tokens; the 10 m ring is pooled to a fixed
+128 tokens whatever the circuit, so a token is a fixed *fraction of the lap* and circuits share one position vocabulary).
+
+* **Separate input projections** for global (2 x 23 inputs), driver (2 x 42) and track tokens (18 static features, 6 flag
+  bits and their visibility, car count), a token-type embedding, and a **ring-position embedding shared by cars and track**:
+  a car gets the embedding of the track token it is on. A learnable "unknown position" is used when a car's location is
+  hidden, and a learnable ghost embedding marks the masked car in the ghost-car task.
+* **BERT encoder** (bidirectional, pre-LN, GELU, scaled-dot-product attention). Driver slots carry no order or identity
+  (slot = alphabetical code in that race), so the encoder is permutation-equivariant over cars (tested).
+* **Graph structure as a learned additive attention bias** per layer and head: circular ring-distance buckets between
+  tokens (T5-style: exact below 16 tokens, logarithmic above, 24 buckets, plus a bucket for the global token and one for
+  unknown positions), and the proximity-edge features of every car pair through a small MLP and one linear map per layer.
+  Absent cars are masked as attention keys.
+* **Inputs are `[value * visible, visible]`**, never a silently zeroed value; missing data (Parquet nulls) is "not visible".
+* **Heads (pre-training):** a driver head (all 42 driver features, compound as 6 logits), a flag
+  head (yellow / double yellow per track token) and a global head (all 23 global features). `F1Bert.encode` returns the hidden
+  states `[B, 151, hidden]` that fine-tuning would use.
+* Embedding lookups and the distance bias are written as broadcasts and one-hot matmuls: their backward pass is a dense
+  reduction, whereas an index-based backward accumulated a huge number of indices into very few rows and was ~45x slower
+  than the forward pass on the GPU.
+
+### The snapshot pretext tasks
+
+Every sample in a batch is assigned one task (default shares A 35 % / B 25 % / C 20 % / D 20 %), so each loss stays clean and
+each task's leakage is controlled on its own.
+
+| | Task | What is hidden | Predicted |
+|---|---|---|---|
+| **A** | Telemetry value regression | 15 % of the (car, channel) cells of `speed_kmh`, `throttle`, `brake`, `rpm` | the hidden values (`brake` is 0/1, so BCE instead of regression) |
+| **B** | Ghost car | **all** features of one random car; the other cars and proximity edges stay | every feature of that car, incl. tyre compound (cross-entropy) |
+| **C** | Flag / marshal-sector condition | *global mode* (50 %): all flag bits on all track tokens + all global status flags. *local mode*: yellow / double yellow on a few marshal sectors (each picked with p = 0.3, flagged ones with p = 0.7) | yellow / double yellow per track token, `is_yellow/sc/vsc/red/...` from the global token |
+| **D** | Strategy state | 15 % of the (car, group) cells of: compound; tyre age / stint / stops / fresh; pace; gaps + position | the hidden values; this is the signal later fine-tuning for undercut / overcut needs |
+
+### Leakage controls (what makes the tasks non-trivial)
+
+Several inputs restate each other; hiding only the target would turn a task into a copy. Everything below is enforced in
+`masking.py` and covered by `tests/pretrain/`.
+
+* **speed -> `vx_mps`, `vy_mps` are hidden with it**: for a car on track `|v|` is 0.96 x speed (corr. 0.85 on the 2019 Australian GP).
+* **Edge features restating a hidden car feature are hidden on every edge touching that car**: `rel_speed_kmh` (speed), and
+  `gap_s`, `order_neighbor`, `drs_window` (gaps / position).
+* **Flags**: the track flag bits (`flag_sc` etc. equal the global status), the global status flags and `drs_enabled` (switched off
+  under SC) are hidden together; in local mode `is_yellow`, `is_green`, `n_yellow_sectors` are hidden too, since they reveal
+  whether a masked sector is flagged.
+* **Ghost car `ghost_edge_mode`**: `relational` (default: edges stay visible, only `rel_speed_kmh` and the car's own
+  features are hidden), `topology` (edge existence only; ring position hidden too) or `none`. In `relational` mode the ghost's
+  gaps/progress are largely derivable from its neighbours' edges, so `topology` is the harder, more informative variant.
+* A test overwrites every hidden cell with garbage and requires bit-identical encoder output.
+
+Known soft leak, left in on purpose: a car's time gap divided into the progress difference gives a smoothed speed over the last
+seconds. That is genuine context, not a copy; hide the gap features together with speed if you want to remove it.
+
+### Training details (snapshot model)
+
+* **Loss:** Huber (delta 1) for continuous features, BCE for binary ones, cross-entropy for the tyre compound; flags use
+  `pos_weight` (yellow 20, global flags 3 by default; the first run used yellow 5). Each task's loss is averaged over its own
+  target cells, then summed with `--task-weights`.
+* **Flagged frames are oversampled** (`--flag-oversample`, default 5x, first run 2x) through a `WeightedRandomSampler`: flags are
+  ~1 % of frames, but they are all of task C.
+* **Validation never splits frames of the same race randomly** (neighbours are near duplicates): whole races are held out when
+  >= 5 are available (first run: 15 of 150, drawn with seed 0), else every 10th 180 s block of each race with a 60 s embargo
+  on both sides (interleaved, not cut from the end: the last laps have progress / tyre-age values never seen in training,
+  which would make validation an extrapolation test).
+* **Fixed validation subset and masks:** `--eval-frames` frames (half of them flagged, if there are enough) are evaluated
+  every `--eval-every` steps with *every* task forced in turn and the same masks each time (generator seeded per task), so
+  evaluations are comparable. Metrics are reported in physical units next to a predict-the-batch-mean baseline (e.g.
+  `val/A_speed_kmh_mae` vs `..._baseline`).
+* **Optimiser:** AdamW (betas 0.9 / 0.98), linear warm-up then cosine decay to 5 % of the peak rate, gradient clipping at 1,
+  optional bfloat16 autocast (`--amp`).
+* **Checkpoints:** `last.pt` every `--save-every` steps and `best.pt` whenever the mean validation loss over `--select-tasks`
+  (default `ABD`) improves; both hold weights, optimiser state, config, arguments and the feature schema. `log.jsonl` gets one
+  line per `--log-every` steps and per evaluation (appended on resume).
+* **Data notes:** statistics are fixed physical scales, not fitted, so a new race needs no refit. The cache keeps every 5th
+  frame (2 Hz). Driver slots are padded to 22 and marshal sectors to 40; the cache builder fails loudly if the manifest
+  schema changes.
+
+### Results of the first run (snapshot model)
+
+Setup: 150 race caches (2019-2025) at 2 Hz, `small` preset (5.04 M parameters), 1,565,657 training frames, 15 held-out
+races (168,723 frames, of which 512 are evaluated), batch 64, bf16, one CUDA GPU at ~1 s/step. The log shows the run was
+restarted once: it was resumed from the step-15,000 checkpoint with the settings above and trained to step 35,000
+(about 6 hours for those 20,000 steps).
+
+<p align="center">
+  <img src="docs/images/pretraining-metrics.png" alt="Training loss, per-task losses, validation losses, learning rate and gradient norm of the first pre-training run" width="560"><br>
+  <em>Produced by <code>tests/visualize_training.py</code> from <code>train.log</code>, i.e. the resumed segment (steps 15,050-35,000):
+  total and validation loss, the four task losses, learning rate and gradient norm.</em>
+</p>
+
+Validation metrics on the held-out races (fixed masks; lower is better unless marked). The baseline predicts the mean of the
+targets in the batch, so it is a deliberately easy bar:
+
+| Task | Metric | Baseline | Step 22,000 (`best.pt`) | Step 35,000 (`last.pt`) |
+|---|---|---|---|---|
+| A | speed MAE (km/h) | 63.4 | 13.3 | 11.5 |
+| A | throttle MAE (%) | 37.0 | 12.0 | 10.8 |
+| A | RPM MAE | 2,310 | 675 | 651 |
+| A | brake accuracy (higher is better) | 0.711 | 0.911 | 0.914 |
+| B | ghost car: position MAE (places) | 4.95 | 1.56 | 1.42 |
+| B | ghost car: speed MAE (km/h) | 66.1 | 39.2 | 34.8 |
+| B | ghost car: tyre-age MAE (laps) | 7.74 | 5.18 | 4.90 |
+| B | ghost car: compound accuracy | - | 0.691 | 0.690 |
+| D | position MAE (places) | 4.82 | 1.39 | 1.29 |
+| D | pace MAE (s) | 1.77 | 0.77 | 0.73 |
+| D | tyre-age MAE (laps) | 7.89 | 4.58 | 4.42 |
+| D | compound accuracy | - | 0.759 | 0.723 |
+| C | yellow-token recall / precision (local mode) | - | 0.030 / 0.099 | 0.018 / 0.060 |
+| C | SC / VSC recall (global mode) | - | 0.83 / 0.85 | 0.65 / 0.80 |
+
+How to read it, honestly:
+
+* **A, B and D clearly learn** something beyond the mean: speed, throttle, RPM, race position, pace and tyre age are
+  recovered with a fraction of the baseline error, and a hidden car's race position is placed within about 1.4 places.
+* **Task C is the weak spot.** Training loss for C reaches ~0.01, but the validation loss is ~0.8, and sector-level yellow flags
+  are almost never found (recall 2-3 %). Safety-car and VSC states are recovered much better. Flag events are rare and
+  validation is evaluated on only 512 frames (half of them flagged), so the C numbers are noisy.
+* **Over-fitting starts after about step 22,000.** The training loss keeps falling (total ~0.22 at step 15,000, ~0.15 at 35,000)
+  while the validation selection loss (tasks A, B, D) is lowest at step 22,000 (0.0854) and rises to 0.0956 by step 35,000, driven
+  by task D (0.126 -> 0.158); A and B still improve. `best.pt` is therefore the better checkpoint to start from. More
+  regularisation or more varied data is the obvious next experiment (see the untested options above).
+* One run, one seed, a small fixed evaluation subset: differences of a few percent between rows are within noise.
+
+### Limitations of the snapshot model
+
+* No fine-tuning, no downstream heads or labels yet.
+* **Single snapshots only** (this model; the [temporal model](#temporal-sequence-pre-training) addresses it): no temporal context across frames. Stacking a window of snapshots is the natural next step, and
+  the data (10 Hz Parquet, `RaceSequence.windows`) already supports it.
+* Driver identity / team is not an input (slots are arbitrary per race), so the encoder cannot learn driver-specific behaviour yet.
+* Task C needs flag events in the training data; a race with no SC/VSC contributes only yellow-sector signal, and the results
+  above show that local yellow flags are not learned well so far.
+* The cache keeps 2 Hz; 10 Hz is interpolated and redundant for these tasks, but short transients (a lock-up, a flag lasting a
+  few seconds) can fall between kept frames.
+* Validation uses 512 frames of 15 races and one seed; use `--eval-frames 2048` or more before drawing fine conclusions.
 
 ## Limitations and caveats
 
@@ -1338,7 +1377,7 @@ interpolation and the pit-return task is still worse than predicting the mean ga
   different set of races than the one the first model was trained on unless that is handled.
 - The `edges` table grows with how many cars run within 5 s / 50 m of each other, so crowded races (starts, safety-car queues)
   are the largest.
-- Pre-training limitations are listed [in their own section](#pre-training-limitations).
+- The limitations of the temporal model are listed in [Results so far and status](#results-so-far-and-status).
 
 ## Testing and continuous integration
 
@@ -1356,7 +1395,7 @@ ruff check . && ruff format --check .      # lint + format
 |---|---|---|
 | Unit | `tests/unit` | One module at a time: geometry on analytic shapes (a circle has a known curvature), race-control replay, telemetry interpolation, anchoring, timing, exporter, plotting, sequence / Parquet round trips, CLI helpers, documentation drift. Includes property-based tests (hypothesis). |
 | Integration | `tests/integration` | End to end: dataset assembly, determinism, **causality**, continuous workflow (file -> windows -> tensors -> GIF), CLI. |
-| Sequence pre-training | `tests/seqbert` | Task-mask invariants (targets never visible, ghost car one slot over all frames, tyre cells only, pit-window cars exactly 18-24 s behind a visible reference car, zone = contiguous middle block), edge features restating a hidden speed are hidden, all three graph encoders forward / backward, **masked vectors carry no information** (noise in masked frames gives identical output), **ghost values do not leak**, dummy-vector pattern, leak-free window split, circuit matching, contrastive loss, `train` CLI smoke run. Needs PyTorch. |
+| Pre-training | `tests/pretrain` | Cache equals the source dataset, race-cache readers, whole-race and block splits, flagged-frame oversampling; windows and the leak-free window split, circuit matching and the contrastive pair sampler; task-mask invariants (targets never visible, ghost car one slot over all frames, tyre cells only, pit-window cars exactly 18-24 s behind a visible reference car, zone = contiguous block); edge features restating a hidden speed are hidden; all three graph encoders forward / backward; **masked vectors carry no information** and **ghost values do not leak** (noise in hidden cells gives identical output); losses, metrics and baselines (interpolation at the window edge); the benchmark and the `train` CLI (resume, init-from, every option, mixed-scale runs, non-finite gradients). Needs PyTorch. |
 | Live | `tests/live` | The real FastF1 API on the 2025 Belgian GP. Deselected by default. |
 
 All offline tests run against `tests/synthetic/session.py`: a synthetic session that mimics FastF1's structure (column
@@ -1443,7 +1482,7 @@ Formula-1/
 ├── tests/
 │   ├── unit/                     one module at a time
 │   ├── integration/              end to end, causality, CLI
-│   ├── seqbert/                  windows, task masks / leakage, encoders, contrastive, training
+│   ├── pretrain/                 cache + race-cache readers, windows, task masks / leakage, encoders, contrastive, benchmark, training
 │   ├── live/                     real FastF1 API (deselected by default)
 │   ├── synthetic/                the synthetic FastF1 session used by all offline tests
 │   ├── test_dataset.py           utility: verify a Parquet dataset and render a diagnostic GIF
@@ -1463,8 +1502,8 @@ Directories that scripts create (large ones are not meant to be committed; check
 | `parquet_datasets/`      | `scripts/scrape.sh` | one `<year>_round_<NN>.ds/sequence_lap1-<N>/` Parquet dataset per race (~100 MB each) |
 | `scraping_logs/`         | `scripts/scrape.sh` | `output_<year>.log` per season, FastF1 log output included (large for 2023-2025) |
 | `cache/`                 | `pretrain.cache` | one memory-mappable cache directory per race (~118 MB each) |
-| `runs/pre1/`             | `pretrain.train` | `best.pt`, `last.pt` (~60 MB each), `log.jsonl`, `args.json`; `runs/bert_pretraining_metrics.png` is the plot of `visualize_training.py` |
-| `runs/pre2+/`            | `seqbert.train` | `ckpt.pt` (rewritten at every evaluation), `args.json`, `log.jsonl` |
+| `runs/pre1/`             | `pretrain.train` (removed) | the archived snapshot-model run: `best.pt`, `last.pt`, `log.jsonl`, `args.json` |
+| `runs/<name>/`           | `seqbert.train` | `best.pt` (best weights), `ckpt.pt` (latest evaluation point with optimiser, resumable), `args.json`, `log.jsonl` |
 | `figures/`               | `seqbert.visualize` | the five report figures of the temporal model (copies used in this README live in `docs/images/seqbert-*.png`) |
 | `train.log`, `nohup.out` | `nohup` | console output of a training run / of an early scrape (`nohup.out` is git-ignored) |
 | `docs/docs/`             | by hand | project notes: see [Related work](#related-work) |
@@ -1477,10 +1516,12 @@ data, masking, model, losses, train, bench) and its tests; `torch` is now a runt
 `tests/test_dataset.py` and `tests/visualize_training.py`; README rewritten around the whole pipeline.
 
 **Temporal pre-training (also unreleased).** New `f1strategy.seqbert` package (config, data, masking, encoders, model, losses,
-train, bench, visualize) and `tests/seqbert`: windows of 10 s / 1 lap / 10 laps, three graph encoders (flatten, sector, GNN), a
-BERT encoder over time, tasks B (ghost car), T (tyre set), P (pit-return window), Z (zone) and an optional contrastive objective,
-interpolation / majority / mean baselines in the validation metrics. The pre-training schema drops `official_position`,
-`pos_age_s` and `car_age_s` (leaks). The README no longer carries the earlier sketch of a temporal module in `pretrain/`.
+train, bench) and its tests: windows of 10 s / 1 lap / 10 laps, three graph encoders (flatten, sector, GNN), a BERT encoder over
+time, tasks B (ghost car), T (tyre set), P (pit-return window), Z (zone) and an optional contrastive objective, interpolation /
+majority / mean baselines in the validation metrics, mixed-scale training (`--scale mixed`: one model on all three scales, per-scale batch sizes and probabilities, per-scale validation and `best_<scale>.pt`), an optional elapsed-time embedding, `best.pt`, `--resume`, `--init-from`, `--dropout`, an optional per-feature
+loss normalisation, gradient-norm logging and skipping of non-finite steps. The single-snapshot model (`pretrain/model.py`,
+`masking.py`, `losses.py`, `train.py`, `bench.py`) and its tests were removed (kept as an [archive](#archived-the-single-snapshot-model));
+the pre-training schema drops `official_position`, `pos_age_s` and `car_age_s` (leaks).
 
 **0.4.0 (10 Hz and Parquet).** Two new driver features (`pos_age_s`, `car_age_s`, so 45 in total),
 `RaceGraphBuilder.snapshot()` (plain data; `build()` now wraps it and returns the same graph), `GraphExporter.export_snapshot()`

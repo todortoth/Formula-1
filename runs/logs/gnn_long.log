@@ -1,0 +1,51 @@
+nohup: ignoring input
+[data] 149 races | long: 192 tokens | windows train 3054 / val 328
+[model] gnn encoder, 16.39 M parameters, device cuda
+step     0 recon    loss 0.7147  1s
+step    25 recon    loss 0.4350  3s
+step    50 recon    loss 0.3238  5s
+step    75 recon    loss 0.1876  7s
+step   100 recon    loss 0.2215  9s
+step   125 recon    loss 0.1663  11s
+step   150 recon    loss 0.5237  13s
+step   175 recon    loss 0.1725  15s
+step   200 recon    loss 0.1790  17s
+step   225 recon    loss 0.3063  19s
+[eval] {'B/position_mae': 4.57, 'B/speed_kmh_mae': 82.664, 'B/gap_to_leader_s_mae': 384.6, 'B/tyre_age_mae': 9.832, 'B/compound_acc': 0.375, 'B/compound_majority_acc': 0.587, 'B/mse': 0.231, 'T/tyre_age_mae': 10.326, 'T/stint_mae': 0.819, 'T/pit_stops_mae': 0.956, 'T/compound_acc': 0.356, 'T/compound_majority_acc': 0.618, 'T/mse': 0.124, 'P/gap_to_leader_s_mae': 19.073, 'P/position_mae': 4.052, 'P/speed_kmh_mae': 72.481, 'P/tyre_age_mae': 9.077, 'P/compound_acc': 0.408, 'P/compound_majority_acc': 0.566, 'P/mse': 0.166, 'Z/speed_kmh_mae': 83.271, 'Z/speed_kmh_interp': 66.707, 'Z/throttle_mae': 40.788, 'Z/throttle_interp': 36.878, 'Z/rpm_mae': 2696.114, 'Z/rpm_interp': 1460.899, 'Z/position_mae': 5.2, 'Z/position_interp': 0.294, 'Z/tyre_age_mae': 9.526, 'Z/tyre_age_interp': 0.983, 'Z/compound_acc': 0.372, 'Z/compound_majority_acc': 0.494, 'Z/mse': 0.209}
+[val] mean MSE over BTPZ: 0.1824 (best 0.1824 - new best.pt)
+step   250 recon    loss 0.1604  23s
+step   275 recon    loss 0.1846  25s
+step   300 recon    loss 0.4884  27s
+step   325 recon    loss 0.1278  29s
+step   350 recon    loss 0.2014  31s
+step   375 recon    loss 0.1731  33s
+step   400 recon    loss 0.2064  35s
+step   425 recon    loss 0.1398  38s
+step   450 recon    loss 0.1779  40s
+step   475 recon    loss 0.1798  42s
+[eval] {'B/position_mae': 4.665, 'B/speed_kmh_mae': 76.702, 'B/gap_to_leader_s_mae': 378.834, 'B/tyre_age_mae': 7.47, 'B/compound_acc': 0.433, 'B/compound_majority_acc': 0.587, 'B/mse': 0.205, 'T/tyre_age_mae': 9.098, 'T/stint_mae': 0.621, 'T/pit_stops_mae': 0.779, 'T/compound_acc': 0.498, 'T/compound_majority_acc': 0.618, 'T/mse': 0.102, 'P/gap_to_leader_s_mae': 16.86, 'P/position_mae': 3.453, 'P/speed_kmh_mae': 69.28, 'P/tyre_age_mae': 7.647, 'P/compound_acc': 0.435, 'P/compound_majority_acc': 0.566, 'P/mse': 0.149, 'Z/speed_kmh_mae': 77.659, 'Z/speed_kmh_interp': 66.707, 'Z/throttle_mae': 38.974, 'Z/throttle_interp': 36.878, 'Z/rpm_mae': 2353.39, 'Z/rpm_interp': 1460.899, 'Z/position_mae': 4.966, 'Z/position_interp': 0.294, 'Z/tyre_age_mae': 8.739, 'Z/tyre_age_interp': 0.983, 'Z/compound_acc': 0.416, 'Z/compound_majority_acc': 0.494, 'Z/mse': 0.189}
+[val] mean MSE over BTPZ: 0.1613 (best 0.1613 - new best.pt)
+step   500 recon    loss 0.1887  46s
+step   525 recon    loss 0.1494  48s
+step   550 recon    loss 0.1332  50s
+step   575 recon    loss 0.1248  52s
+step   600 recon    loss 0.1276  54s
+step   625 recon    loss 0.1158  56s
+step   650 recon    loss 0.1482  57s
+step   675 recon    loss 0.2177  58s
+step   700 recon    loss 0.1317  59s
+step   725 recon    loss 0.1384  61s
+[eval] {'B/position_mae': 4.748, 'B/speed_kmh_mae': 76.33, 'B/gap_to_leader_s_mae': 377.329, 'B/tyre_age_mae': 7.723, 'B/compound_acc': 0.455, 'B/compound_majority_acc': 0.587, 'B/mse': 0.194, 'T/tyre_age_mae': 8.535, 'T/stint_mae': 0.547, 'T/pit_stops_mae': 0.74, 'T/compound_acc': 0.506, 'T/compound_majority_acc': 0.618, 'T/mse': 0.101, 'P/gap_to_leader_s_mae': 16.325, 'P/position_mae': 3.216, 'P/speed_kmh_mae': 67.48, 'P/tyre_age_mae': 7.247, 'P/compound_acc': 0.54, 'P/compound_majority_acc': 0.566, 'P/mse': 0.139, 'Z/speed_kmh_mae': 74.614, 'Z/speed_kmh_interp': 66.707, 'Z/throttle_mae': 38.971, 'Z/throttle_interp': 36.878, 'Z/rpm_mae': 2194.661, 'Z/rpm_interp': 1460.899, 'Z/position_mae': 4.813, 'Z/position_interp': 0.294, 'Z/tyre_age_mae': 8.278, 'Z/tyre_age_interp': 0.983, 'Z/compound_acc': 0.52, 'Z/compound_majority_acc': 0.494, 'Z/mse': 0.184}
+[val] mean MSE over BTPZ: 0.1545 (best 0.1545 - new best.pt)
+step   750 recon    loss 0.1759  65s
+step   775 recon    loss 0.2254  67s
+step   800 recon    loss 0.1284  68s
+step   825 recon    loss 0.1634  70s
+step   850 recon    loss 0.1656  72s
+step   875 recon    loss 0.1467  74s
+step   900 recon    loss 0.2517  76s
+step   925 recon    loss 0.1379  78s
+step   950 recon    loss 0.1368  80s
+step   975 recon    loss 0.1488  82s
+[eval] {'B/position_mae': 4.86, 'B/speed_kmh_mae': 74.446, 'B/gap_to_leader_s_mae': 376.221, 'B/tyre_age_mae': 7.344, 'B/compound_acc': 0.487, 'B/compound_majority_acc': 0.587, 'B/mse': 0.189, 'T/tyre_age_mae': 8.516, 'T/stint_mae': 0.561, 'T/pit_stops_mae': 0.747, 'T/compound_acc': 0.549, 'T/compound_majority_acc': 0.618, 'T/mse': 0.099, 'P/gap_to_leader_s_mae': 16.085, 'P/position_mae': 3.225, 'P/speed_kmh_mae': 66.893, 'P/tyre_age_mae': 7.135, 'P/compound_acc': 0.569, 'P/compound_majority_acc': 0.566, 'P/mse': 0.136, 'Z/speed_kmh_mae': 74.013, 'Z/speed_kmh_interp': 66.707, 'Z/throttle_mae': 38.651, 'Z/throttle_interp': 36.878, 'Z/rpm_mae': 2132.599, 'Z/rpm_interp': 1460.899, 'Z/position_mae': 4.813, 'Z/position_interp': 0.294, 'Z/tyre_age_mae': 8.247, 'Z/tyre_age_interp': 0.983, 'Z/compound_acc': 0.539, 'Z/compound_majority_acc': 0.494, 'Z/mse': 0.18}
+[val] mean MSE over BTPZ: 0.1510 (best 0.1510 - new best.pt)

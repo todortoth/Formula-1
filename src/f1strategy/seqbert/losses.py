@@ -35,8 +35,23 @@ def build_weights(mb: SeqBatch) -> torch.Tensor:
     return torch.cat([w_drv.flatten(2), w_glb, w_trk], -1).float()
 
 
-def reconstruction_loss(pred, tgt, w, task, kind: str = "mse", cos_weight: float = 0.0):
-    """-> (total, {task: loss}). Per task: mean over its cells; tasks are averaged afterwards."""
+VAR_FLOOR = 0.02  # target variances below this are treated as this (rare binary columns must not explode)
+
+
+def _feature_normalised(err, t, wk):
+    """Mean over columns of (weighted error of the column / variance of its targets): every feature counts equally."""
+    e, tt, ww = err.flatten(0, 1), t.flatten(0, 1), wk.flatten(0, 1)
+    cnt = ww.sum(0)
+    n = cnt.clamp(min=1.0)
+    mean = (ww * tt).sum(0) / n
+    var = (ww * (tt - mean) ** 2).sum(0) / n
+    col = (ww * e).sum(0) / n / var.detach().clamp(min=VAR_FLOOR)
+    return col[cnt > 0].mean()
+
+
+def reconstruction_loss(pred, tgt, w, task, kind: str = "mse", cos_weight: float = 0.0, norm: str = "none"):
+    """-> (total, {task: loss}). Per task: mean over its cells (``norm="feature"``: mean over feature columns of the
+    variance-normalised error); tasks are averaged afterwards."""
     pred, tgt = pred.float(), tgt.float()
     per, terms = {}, []
     for k, name in enumerate(TASKS):
@@ -46,7 +61,7 @@ def reconstruction_loss(pred, tgt, w, task, kind: str = "mse", cos_weight: float
             continue
         p, t = pred[sel], tgt[sel]
         err = (p - t) ** 2 if kind != "huber" else Fn.huber_loss(p, t, reduction="none", delta=1.0)
-        loss = (err * wk).sum() / wk.sum()
+        loss = _feature_normalised(err, t, wk) if norm == "feature" else (err * wk).sum() / wk.sum()
         if kind == "cosine" or cos_weight > 0:
             pw, tw = (p * wk).flatten(0, 1), (t * wk).flatten(0, 1)
             has = wk.flatten(0, 1).sum(-1) > 0
@@ -164,8 +179,10 @@ def _interp_block(v: torch.Tensor, vec_mask: torch.Tensor, valid: torch.Tensor) 
             continue
         a, e = int(idx[0]) - 1, int(idx[-1]) + 1
         if a < 0 and e >= T:
+            continue  # nothing visible to anchor on
+        if a < 0 or e >= T:  # block at the edge of the window: hold the nearest visible frame
+            out[b, idx] = v[b, e if a < 0 else a][None]
             continue
-        a, e = max(a, 0), min(e, T - 1)
         lam = ((idx.float() - a) / max(e - a, 1))[:, None]
         out[b, idx] = v[b, a][None] * (1 - lam) + v[b, e][None] * lam
     return out
