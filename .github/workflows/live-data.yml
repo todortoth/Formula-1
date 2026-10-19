@@ -4,7 +4,7 @@ name: Live data tests
 # network access, downloads a lot of data and depends on the availability of F1's servers.
 on:
   schedule:
-    - cron: "0 6 * * 1"   # Mondays, 06:00 UTC
+    # - cron: "0 6 * * 1"   # Mondays, 06:00 UTC
   workflow_dispatch:
 
 permissions:
