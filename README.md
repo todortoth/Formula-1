@@ -1296,7 +1296,7 @@ checkpoint (the validation loss is the mean MSE of the four tasks in normalised 
 * The first log version printed no `*_mean` baselines; this is fixed, so the comparison with the mean baseline at the long scale
   is still outstanding (read it from the new logs).
 
-**4. Mixed-scale training (supervisor's design) is implemented and tested, but has not been run on the corpus yet.** A smoke run on
+**4. Mixed-scale training is implemented and tested, but has not been run on the corpus yet.** A smoke run on
 one race trains all three scales together and writes the per-scale validation losses and best checkpoints. There are no
 results to report; the open questions are whether one model on three scales beats the curriculum, how large the share of `long`
 may be before it over-fits, and whether `--time-embed` helps.

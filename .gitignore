@@ -25,3 +25,9 @@ htmlcov
 #HUN-REN
 uv.lock
 nohup.out
+
+#BIG
+runs/mixed_gnn/ckpt.pt
+
+#Temporary Office files
+~$*
