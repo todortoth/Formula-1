@@ -23,7 +23,8 @@ A kutatók öt különböző mélytanulási modellt képeztek ki 10 lépéses sz
 - InceptionTime: Eredetileg képfeldolgozásra tervezett Inception-modulok idősoros változata, amely különböző méretű konvolúciós szűrőkkel képes eltérő skálájú mintázatokat azonosítani.
 - CNN-BiLSTM: Hibrid modell, amely először egy 1D konvolúciós réteggel kinyeri a lokális/rövid távú mintákat (pl. hirtelen köridő-ugrás), majd ezeket átadja a BiLSTM rétegeknek a hosszú távú trendek elemzésére.
 
-3. Eredmények és Statisztikai VerifikációA modelleket a 2024-es szezon utolsó 8 versenyének adatain tesztelték. Mivel a teszthalmaz erősen kiegyensúlyozatlan (mindössze 3% bokszkiállás), a kisebbségi osztályra (HasPitStop = 1) vonatkozó precizitást (Precision), felidézést (Recall) és F1-pontszámot figyelték.
+3. Eredmények és Statisztikai Verifikáció
+A modelleket a 2024-es szezon utolsó 8 versenyének adatain tesztelték. Mivel a teszthalmaz erősen kiegyensúlyozatlan (mindössze 3% bokszkiállás), a kisebbségi osztályra (HasPitStop = 1) vonatkozó precizitást (Precision), felidézést (Recall) és F1-pontszámot figyelték.
 A Bi-LSTM modell statisztikai fölényét a 95%-os konfidenciaintervallumok (CI) mellett elvégzett McNemar-féle páros tesztek is igazolták. A legközelebbi versenytárssal (TCN-GRU) szemben kapott p-érték 0,042, míg a többi modell esetében p < 0,001 lett, ami kimondja, hogy a Bi-LSTM jobb teljesítménye nem a véletlen műve.A gyakorlati alkalmazhatóságot két esettanulmányon (2025-ös Kínai Nagydíj és 2024-es Szingapúri Nagydíj) keresztül is bemutatták egy egyedileg fejlesztett vizualizációs interfészen, ahol a modell sikeresen követte le a valós helyzeteket.
 
 4. Felhasznált változók

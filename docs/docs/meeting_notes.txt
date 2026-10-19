@@ -1,0 +1,28 @@
+2026.10.16:
+1-2 fix hossz: nagyon rövid (10 sec), közepes (1 kör), nagyon hosszú (10 kör) -> 5* ennyi batch méret -> megnézni mi az amit bevesz a gpu
+miért torch és nem huggingface/torch transformer
+gnn gráf vektor -> transformer layer - PATRIK féle workflow
+Implementációs kérdés: hogyan csinálod a vektort, a transformer encoder implementáció
+pre-training: data leakage miatt A kivéve, B OK, 
+új task: telemetria masking helyett gumikeverék masking és mennyi ideje
+ahova visszajönne kiállás után ott maskolni pl. 18-24 másodperc között
+mlm, zóna (szektor, kanyarkombináció kitakarás)
+contrasted learning (hasonló/nem hasonló pályák, vagy azonos pályán belül a rajtok)
+akkor jó a BERT ha olyan taskok vannak amikkel megtanulja az undeying dolgokat
+fél környi 10-20 x másodpercnyi adatot maskolni
+100 gráf, vector, középső 35 kimaszkolva (más full 0 (vagy -0.1, 0.1...) vector modell bemenetnek), be a traszformerbe -> 100 darab időbeli mintás vektor -> a 35 már nem full 0 vector linear rétegbe (minden pretrainingre külön) pl. az elsőt és az reconstructolja 20 playernek és a pályának a kilapított adatát
+ 
+
+2026.10.19:
+pályanode-ok átlagolása egyeneseknél
+PyG használata !!
+Fine tuning: BERT modell (gráf encoder + transformer) kiköpi a kontextualizált embeddingeket, pre trainingkor 4 HEAD-del betanítod a modellt különböző pre-training taskokra. A fine-tuning ugyan ez, csak leveszed a HEADeket a modellről és raksz rá új HEAD-et. Egy érdekesség: megvan az opció arra, hogy kicsikét módosítsd a modellt/úgy hagyod ahogy van => van egy alap modell (gnnenc. + transformer), ez kiköpi az embeddingeket, a fine tuningnál a végére raksz egy újabb HEAD-et, amit betanítasz valamien feladatra. Opciók: alap modell teljesen befagyasztva (ő már nem tanul semmit, csak az új HEAD), tehát az embedding ugyan az lesz, kérdés, hogy az új fej meg tudja-e tanulni elég jól a dolgokat, ha nem, akkor már lehet nem csak egy rétegű neurhálót használni. Azt is lehet, hogy nem akarod megtartani az eredeti modellt, hanem hagyod tovább fejlődni, új HEAD a modell végére, az encoder+transformer rész is tud tanulni (kicsit váltotzhat az embedding, de magmarad a korábbi tudás az F1 mintázatairól), fine tuningnál lehet kisebb learning rate
+-> rajz (supervised learning, nem csak szekvenciákat adunk be, hanem valamilyen ground truth értéket is)
+Fine tuning task: következő 5 körben kijön-e 
+->milyen keveréket kap
+->adott szekvencia végén hanyadik körre jósoljuk egy adott autó következő cseréjét
+->1 körös és 10 körös szekvenciákra
+Baselineok: ???
+Teszt: 2026-os szezon versenyein
+->Olyan címkézett szekvenciákat kell gyártani bemenetként, ahol pl. Hamilton esetén első 10 kör, a 10. kör végén 12 körre van a kerékcsere (tehát a 22. körben), utána 7. körtől nézve 10 kör, itt a szekvencia végére (17. kör) már csak 5 környire van
+->Köridőt itt bevenni, mint feature elég árulkodó, mert a pit körök sokkal lassabbak, mint a körülöttük lévők, hiszen a pit lane-ben nagyon lassan kell menniük, de lehet olyan szekvencia ami tartalmaz kerékcserét ettől függetlenül, ezért ezt az adatot és bármi más ilyen árulkodó dolgot a bemeneti szekvencia adatkészletéből el kell távolítani.
