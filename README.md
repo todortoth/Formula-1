@@ -4,7 +4,7 @@
 ![Python](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12%20%7C%203.13-blue)
 ![Code style](https://img.shields.io/badge/code%20style-ruff-261230)
 
-Models Formula 1 races as **graphs** and pre-trains a transformer on them. The project has three layers that build on
+Models Formula 1 races as **graphs** and pre-trains a transformer on them. The project has three layers (plus a supervised fine-tuning stage) that build on
 each other:
 
 1. **Graph snapshots.** [FastF1](https://github.com/theOehrly/Fast-F1) race data becomes, for any moment of a race, a ring
@@ -16,7 +16,8 @@ each other:
    with four masked-reconstruction tasks (telemetry, ghost car, flags, strategy state). There are no labels yet: the
    output is an encoder checkpoint that later fine-tuning (undercut / overcut, pit window, ...) can start from. A second, **temporal** model
    (`f1strategy.seqbert`) runs attention over *time*: one token per graph of a sequence of 10 s, 1 lap or 10 laps, pre-trained with
-   ghost-car, tyre-set, pit-return-window and zone-masking tasks.
+   ghost-car, tyre-set, pit-return-window and zone-masking tasks. A fourth layer, **supervised fine-tuning** (`f1strategy.finetune`),
+   puts a new head on that checkpoint and teaches it labelled pit-stop questions (will the car pit within 5 laps, in how many laps, onto which compound).
 
 The long-term goal is to analyse races and find optimal strategic decisions; this repository is the data and
 representation-learning foundation for that.
@@ -67,6 +68,15 @@ representation-learning foundation for that.
   - [Figures for reports](#figures-for-reports)
   - [Using a temporal checkpoint](#using-a-temporal-checkpoint)
   - [Results so far and status](#results-so-far-and-status)
+- **Stage 5 - supervised fine-tuning**
+  - [Supervised fine-tuning](#supervised-fine-tuning)
+  - [The tasks and how the labels are cut](#the-tasks-and-how-the-labels-are-cut)
+  - [Leak control of the input](#leak-control-of-the-input-finetunescrubpy)
+  - [Freeze modes](#freeze-modes-how-much-of-the-pre-trained-model-may-change)
+  - [Baselines](#baselines)
+  - [Seasons](#seasons)
+  - [Running it](#running-it)
+  - [Status and limitations](#status-and-limitations)
 - **Archive - the single-snapshot model (code removed)**
   - [Archived: the single-snapshot model](#archived-the-single-snapshot-model)
   - [Model](#model-snapshot-model)
@@ -106,7 +116,8 @@ flowchart LR
 | **2. Corpus**                | `scripts/scrape.sh` -> `scripts/scrape_data.sh <year>` | the 2019-2025 calendars | `parquet_datasets/<year>_round_<NN>.ds/sequence_lap1-<N>/` per race, logs in `scraping_logs/` | 7 parallel workers, one per season; 152 rounds scheduled, Belgium 2021 fails (see [corpus](#building-the-corpus-bulk-scraping)) |
 | **3. Training cache**        | `python -m f1strategy.pretrain.cache` | the Parquet datasets | `cache/<year>_round_<NN>/` with `meta.json` and `.npy` memory maps | stride 5 -> ~10 k frames and ~118 MB per race (2019 Australian GP: 10,256 frames) |
 | **4. Temporal pre-training** | `python -m f1strategy.seqbert.train` | the caches (windows of 10 s / 1 lap / 10 laps, one scale per run or `--scale mixed` for all three at once) | `runs/<n>/best.pt` (best weights; `best_<scale>.pt` per scale in a mixed run), `ckpt.pt` (latest, resumable), `log.jsonl`, `args.json` | `base` preset with the GNN encoder: 16.4 M parameters, ~0.085 s/step in the first scale tests; see [measured cost](#measured-cost-and-the-benchmark) |
-| **5. Inspection**            | `tests/test_dataset.py`, `tests/visualize_training_loss.py`, `python -m f1strategy.seqbert.bench`, `python -m f1strategy.seqbert.visualize` | a dataset / `log.jsonl` / a cache | verification GIF, loss plot, per-step timing and memory, report figures | - |
+| **5. Fine-tuning**           | `python -m f1strategy.finetune.labels`, `.train`, `.evaluate` | the Parquet datasets (labels), the caches, a pre-trained `best.pt` | `cache/<race>/ft_labels.npz`, `runs/ft_*/best.pt`, `log.jsonl`, test report (JSON) | frozen mode: features computed once, head trains in seconds; see [Supervised fine-tuning](#supervised-fine-tuning) |
+| **6. Inspection**            | `tests/test_dataset.py`, `tests/visualize_training_loss.py`, `python -m f1strategy.seqbert.bench`, `python -m f1strategy.seqbert.visualize` | a dataset / `log.jsonl` / a cache | verification GIF, loss plot, per-step timing and memory, report figures | - |
 
 Each stage only depends on the files written by the previous one, so any stage can be re-run on its own. The **schema** is
 the contract between the stages: the feature name lists (42 driver in the training schema, 23 global, 7 edge, 18 static track features, 6 flag
@@ -141,6 +152,10 @@ from the lists in `pretrain/schema.py`.
   sector pooling) and runs a bidirectional `nn.TransformerEncoder` over *time*, on windows of 10 s, 1 lap or 10 laps (one scale per run, or all three at once in one model). Pre-trained
   with ghost-car, tyre-set, pit-return-window and zone masking plus an optional contrastive objective; benchmark script and
   report figures included.
+- **Supervised fine-tuning.** `f1strategy.finetune` replaces the pre-training heads by a new head per car slot and learns three labelled
+  pit-stop questions (pit within H laps, laps to the stop, compound received) from labels cut out of the Parquet data, with the stop's
+  fingerprints scrubbed from the input, four freeze modes (`frozen`, `partial`, `full`, `scratch`) and `prior` / `rule` / gradient-boosting baselines; trained on
+  2019-2024, validated on 2025, tested on 2026.
 - **Animated GIF** of the same arrays (flag-coloured track, cars with trails, leaderboard, flag banner), next to the
   original point-by-point graphs and PNGs, which are unchanged.
 - **Model-ready export.** Fixed, named feature schema (one-hot, sin/cos, zero-filled with masks), optional
@@ -1324,6 +1339,178 @@ may be before it over-fits, and whether `--time-embed` helps.
   validation and `best_<scale>.pt` exist to see whether one scale pays for the others.
 * **Position leak** (which rank is missing) is accepted, see [the leakage controls](#temporal-leakage-controls).
 
+## Supervised fine-tuning
+
+`src/f1strategy/finetune/` turns the pre-trained temporal BERT into a **pit-stop predictor**. Pre-training had no labels (it
+reconstructs hidden parts of the race); here the sequences come with a **ground truth** that is read from what happens *after*
+the end of the window, so this is ordinary supervised learning on top of the learned representation.
+
+<p align="center">
+  <img src="docs/images/fig6_finetune.png" alt="Fine-tuning: pre-trained backbone, new head, labels cut from the future of the window" width="900"><br>
+  <em>Top: the backbone (graph encoder + temporal transformer) is the one from pre-training, its heads (reconstruction, contrastive)
+  are deleted and one new head per car slot is added. Bottom: how a label is cut from a race (generated by
+  <code>scripts/draw_finetune_figure.py</code>).</em>
+</p>
+
+```mermaid
+flowchart LR
+    PQ[("parquet_datasets<br/>pit_stops, stint, lap_number")] --> LB["finetune.labels<br/>ft_labels.npz per race"]
+    NPY[("cache/YEAR_round_NN")] --> W["finetune.dataset<br/>windows end on a 10 s grid,<br/>1 lap or 10 laps"]
+    LB --> W
+    W --> SC["scrub<br/>no in_pit, no lap time"]
+    SC --> BB["backbone from best.pt<br/>graph encoder + transformer"]
+    BB --> P["pooling<br/>CLS + last token"]
+    P --> H["NEW head per car slot"]
+    H --> L["masked losses<br/>pit5 - laps - compound - no more"]
+    LB --> L
+    LB --> BL["baselines<br/>prior - rule - gbdt"]
+    H --> EV["evaluate on 2026"]
+    BL --> EV
+```
+
+### The tasks and how the labels are cut
+
+A sample is one window of T graphs (`medium` = 1 lap, 96 tokens; `long` = 10 laps, 192 tokens) and, for **every car slot**, the
+answers to three questions about the **next tyre-change stop that begins after the last frame of the window**:
+
+| Task | Target | Output | Loss | Metrics |
+|---|---|---|---|---|
+| `pit` | does the car pit within the next H laps (default H = 5; several horizons allowed)? | one logit per horizon | masked BCE | ROC-AUC, average precision, best F1, Brier |
+| `laps` | after how many laps is the stop? | `log1p(laps)` | Huber on the log scale | MAE, median AE, share within +-1 / +-2 laps |
+| `cmp` | which compound does the car receive (soft, medium, hard, intermediate, wet)? | 5 logits | masked cross-entropy | accuracy, macro-F1, confusion matrix, majority accuracy |
+| `nomore` | does the car make no further stop at all? | one logit | masked BCE (weight 0.5) | ROC-AUC |
+
+* **Laps are counted the way a strategist counts them.** A car that has completed `c = lap_number - 1` laps and stops at the end
+  of lap `L` has `L - c` laps to go: a sequence ending at the end of lap 10 with the stop in lap 22 has label **12**; the same car
+  seen from the end of lap 17 has label **5**; the stop is "within 5 laps" iff the label is <= 5. The label is the car's *own* lap counter
+  (lapped cars count their own laps).
+* **A tyre-change stop** is a pit-lane entry (`pit_stops` increases) that is followed by a new stint (`stint` increases) before the next
+  entry. Drive-through and stop-go penalties therefore do not count, and the compound label is the compound of the new stint.
+  Red-flag stops count if the tyres were changed.
+* **Which (window, car) pairs are used (`valid`).** The car exists in the last frame and is not in the pit lane, has not finished or
+  retired, and a retiring car without a next stop is dropped (its "no more stops" would come from the retirement, not from strategy).
+  `laps` and `cmp` exist only where a next stop exists (conditional metrics); `pit` and `nomore` are defined for every valid pair
+  (no further stop means "does not pit within 5 laps").
+* **Where windows end.** Window ends lie on a 10 s grid (every 20th cache frame), 30 s apart for `medium` and 60 s for `long`
+  (`--hop-s`), so one race gives about 150 1-lap windows and about 70 10-lap windows; each window carries up to 22 labelled cars.
+  Neighbouring windows overlap heavily, which is why the splits below are by season, never random.
+* **Where the labels come from.** `python -m f1strategy.finetune.labels` reads the Parquet datasets (the raw, un-normalised
+  `pit_stops`, `stint`, `lap_number`, compound one-hots), aligns them to the cache frames by session time and writes
+  `cache/<race>/ft_labels.npz` (labels at every cache frame, plus a table of raw strategy features every 10 s for the baselines).
+  On the 2019 Australian GP it finds Hamilton's single stop (in-lap 15, medium after soft) and labels every frame before it
+  with the laps to go (15 at the start, 1 in lap 15).
+
+### Leak control of the input (`finetune/scrub.py`)
+
+A window may contain an **earlier** stop, and a stop leaves obvious fingerprints: the in/out laps are 20+ s slower, the car is in the
+pit lane, off the racing line, at the limiter. A model that reads these learns "a stop is in this window" instead of reading tyres,
+traffic and race state. The fingerprint features are therefore overwritten in **all frames of all cars** before the encoder sees
+the window (`--scrub`):
+
+| Level | Removed | Remark |
+|---|---|---|
+| `none` | nothing | ablation: how much do the fingerprints help? |
+| `basic` (default) | `in_pit`, `last_lap_time_s` | the lap time of the in/out lap and the pit-lane flag. `pace_last3_s` stays: by definition it excludes in/out laps and laps under SC / VSC / red |
+| `strict` | `basic` + `lateral_offset_m`, `heading_rel_track_sin/cos`, `on_track`, `stint`, `pit_stops` | also the pit-lane geometry and the stop counters; tyre age and compound stay, they *are* the strategy state |
+
+Removed columns are set to a constant (`--scrub-fill zero`, safe for every encoder) or to NaN (`nan`, the cache's own "missing"). **What no
+scrub can remove:** a stop still shows in `position` and the gaps (the car loses about 20 s) and in a reset `tyre_age`. That is real
+information, a strategist sees it too; the tabular baselines see the same state at the end of the window. Report results for `basic`
+and, as an ablation, for `none` and `strict`.
+
+### Freeze modes: how much of the pre-trained model may change?
+
+`--mode` decides what is trained. The pre-training heads (the 1-layer reconstruction head and the contrastive projection head) are always deleted; the new
+head reads a pooled embedding (`--pool cls_last`: the `[CLS]` vector and the last usable time step, i.e. the end of the sequence).
+
+| `--mode` | Trained | Use |
+|---|---|---|
+| `frozen` | the new head only; the backbone (also dropout) is fixed, so the embedding is exactly the pre-trained one | first experiment: does the existing representation already contain the answer? The pooled features are computed **once**, so the head trains in seconds and `--head linear` / `--head mlp` can be compared cheaply |
+| `partial` | head + the last `--unfreeze-last` transformer layers (+ final norm); graph encoder frozen | middle way, cheap, keeps the per-frame graph vectors |
+| `full` | everything; backbone at `--lr-backbone` (default 2e-5, small), head at `--lr-head` (1e-3) | the embedding may shift a little while the knowledge about race patterns is kept; `--head-warmup-steps N` trains the head alone for N steps first (linear probe, then fine-tune) |
+| `scratch` | everything, random weights, same architecture | control: what is pre-training worth? Use a larger `--lr-backbone` (e.g. 2e-4) |
+
+If a linear head on frozen features is too weak, the next step is `--head mlp --head-layers 2` (still frozen), and only then `partial` / `full`.
+The head has one output block per car slot, like the pre-training head, so slot *k* is read from the part of the embedding that describes slot *k*.
+
+### Baselines
+
+All baselines are scored by the same `metrics.summarize` on the identical (window, car) pairs; none sees the sequence, only the strategy state of the car
+at the **end** of the window (that is what a strategist glances at), so any gain of the model must come from the sequence and the field around the car.
+
+| Baseline | What it does |
+|---|---|
+| `prior` | base rate, median laps, most frequent compound of the training seasons; no input |
+| `rule` | the rule of thumb: median stint length of the current compound (training seasons) minus the tyre age is the laps to go; next compound from a (current compound, stops so far) transition table |
+| `gbdt` | gradient-boosted trees (scikit-learn `HistGradientBoosting`, `pip install scikit-learn`) on the raw strategy features of the car and the race: tyre age, compound, stint, stops, position, gaps, pace, laps remaining, flags, weather, track length. The one to beat |
+| model, `scratch` | the same architecture without pre-training (what pre-training adds) |
+| model, `frozen` / `partial` / `full`, `--scrub none` | the freeze options and the fingerprint ablation |
+
+### Seasons
+
+Training 2019-2024, validation 2025 (model selection), **test 2026** (`--train-years`, `--val-years`, `evaluate --years`). The test season was not in the pre-training corpus (2019-2025), so it is untouched by
+both stages. `train.py` never reads the test seasons. 2026 is a new regulation season (new cars, 22 cars on the grid, new tyre allocations),
+so a drop against 2025 is expected and is itself a result. The 2026 races have to be scraped and cached like the others
+(`scripts/scrape_data.sh 2026`, then `pretrain.cache`, then `finetune.labels`; `scrape.sh` covers 2019-2025 only).
+
+### Running it
+
+```bash
+# 0) labels next to every cache (2019-2026), reads parquet_datasets/ and cache/
+python -m f1strategy.finetune.labels --parquet parquet_datasets --cache cache
+
+# 1) frozen backbone, linear head: minutes; then the same with an MLP head
+python -m f1strategy.finetune.train --cache cache --init runs/mixed_gnn/best.pt --out runs/ft_medium_frozen \
+    --scale medium --mode frozen --head linear --tasks pit,laps,cmp,nomore --horizons 5 --amp
+python -m f1strategy.finetune.train --cache cache --init runs/mixed_gnn/best.pt --out runs/ft_medium_frozen_mlp \
+    --scale medium --mode frozen --head mlp --head-layers 2 --amp
+
+# 2) let the backbone move a little (smaller learning rate), head warm-up first
+python -m f1strategy.finetune.train --cache cache --init runs/mixed_gnn/best.pt --out runs/ft_medium_full \
+    --scale medium --mode full --head mlp --lr-backbone 2e-5 --lr-head 1e-3 --head-warmup-steps 300 --steps 4000 --amp --workers 8
+
+# 3) controls: no pre-training, fingerprints left in
+python -m f1strategy.finetune.train --cache cache --init runs/mixed_gnn/best.pt --out runs/ft_medium_scratch \
+    --scale medium --mode scratch --head mlp --lr-backbone 2e-4 --steps 4000 --amp --workers 8
+python -m f1strategy.finetune.train --cache cache --init runs/mixed_gnn/best.pt --out runs/ft_medium_noscrub \
+    --scale medium --mode full --head mlp --scrub none --steps 4000 --amp --workers 8
+
+# 4) 10-lap sequences: the same with --scale long (batch 16)
+# 5) test season 2026: the model next to prior / rule / gbdt, overall and per race
+python -m f1strategy.finetune.evaluate --cache cache --run runs/ft_medium_full/best.pt --years 2026 --report report_medium_full.json
+python -m pytest tests/finetune
+```
+
+| Option (`finetune.train`) | Default | Meaning |
+|---|---|---|
+| `--init` | required | pre-trained `best.pt` (a mixed checkpoint works at `--scale medium` and `long`); also the architecture source for `scratch` |
+| `--scale` | `medium` | `medium` (1 lap) / `long` (10 laps) |
+| `--mode`, `--unfreeze-last` | `frozen`, 2 | see [freeze modes](#freeze-modes-how-much-of-the-pre-trained-model-may-change) |
+| `--tasks`, `--horizons`, `--loss-weights` | all four, `5`, `nomore=0.5` | which losses are trained; laps for the "within H laps" question (`3,5,10` trains three logits); loss weights |
+| `--head`, `--head-hidden`, `--head-layers`, `--head-dropout`, `--pool` | `linear`, 512, 1, 0.1, `cls_last` | head shape (`linear` = one layer, `mlp` = hidden layers) and pooling (`cls`, `last`, `mean`, `cls_last`, `cls_last_mean`) |
+| `--scrub`, `--scrub-fill` | `basic`, `zero` | leak control of the input, see above |
+| `--train-years`, `--val-years`, `--hop-s` | `2019-2024`, `2025`, 30 s / 60 s | season split and spacing of the window ends |
+| `--steps`, `--batch-size`, `--eval-every` | 3000, 32 / 16, 250 | optimiser steps (frozen mode: head steps on precomputed features), samples per step, validation interval |
+| `--lr-head`, `--lr-backbone`, `--head-warmup-steps`, `--warmup`, `--weight-decay`, `--grad-clip` | 1e-3, 2e-5, 0, 100, 0.01, 1.0 | AdamW with two learning rates (the backbone group is empty in `frozen`), linear warm-up, cosine decay |
+| `--amp`, `--device`, `--workers`, `--seed` | off, auto, 4, 0 | as in pre-training |
+
+`best.pt` of a run holds backbone + head weights and everything `evaluate.py` needs (head config, scale, scrub columns); the checkpoint with the best validation
+score (ROC-AUC of the first horizon, else laps MAE, else compound accuracy) is kept. `log.jsonl` has the losses and every validation metric.
+
+### Status and limitations
+
+* **Implemented and partly tested.** The label logic (the 12 / 5 example, penalties, pit lane, retirements), metrics, scrub levels and the `prior` / `rule` /
+  `gbdt` baselines are covered by `tests/finetune` (numpy only); the label builder was run on the 2019 Australian GP Parquet dataset. `tests/finetune/test_model.py` (shapes,
+  pooling, freeze modes, losses) needs PyTorch and the temporal package, and the training / evaluation scripts have **not been run on the corpus yet**: there are no
+  results to report, and the first run will show whether the assumptions below hold.
+* **Two assumptions about code outside this stage.** The scrub overwrites columns of `raw["drv"]` with a constant before `SeqMasker.plain`; `--scrub-fill nan` additionally
+  relies on `plain` treating NaN as missing, as the cache does. Slot indices of the labels are the Parquet `slot` column, the same slots as in the cache.
+* **Per-slot head.** Slots are alphabetical per race, so slot *k* is a different driver in every race; the head must read slot *k*'s block of the embedding, which the
+  pre-training head had to do as well. If a linear head is too weak, `mlp` or `partial` / `full` give it room.
+* **Sample counts are correlated.** One window labels up to 22 cars and neighbouring windows overlap; the effective sample size is much smaller than the number of (window, car) pairs. Compare methods on the same test races and read the per-race table of `evaluate.py`.
+* **The label is conditional where it must be.** `laps` and `cmp` are scored only where a next stop exists; a car without one is covered by `nomore`.
+* **Rare cases.** Red-flag stops, cars that stop twice in a few laps, wet races (intermediate / wet are rare classes) and safety-car stops (cheap stops are not predictable from the sequence) are in the data as they are.
+
 ## Archived: the single-snapshot model
 
 The first pre-training model encoded **one snapshot at a time**: its tokens were the 151 nodes of one graph (`[GLOBAL]`, 22 driver
@@ -1573,6 +1760,7 @@ Formula-1/
 ├── pyproject.toml                packaging, dependencies, pytest / ruff / coverage config
 ├── requirements.txt              pip freeze of the author's environment (reference only)
 ├── scripts/
+│   ├── draw_finetune_figure.py   draws docs/images/fig6_finetune.png
 │   ├── generate_readme.py        renders README.md from docs/readme_template.md
 │   ├── scrape.sh                 starts one background scraping worker per season 2019-2025
 │   └── scrape_data.sh            scrapes one season, round by round, into parquet_datasets/
@@ -1612,6 +1800,16 @@ Formula-1/
 │   │   ├── losses.py             reconstruction / contrastive losses, physical-unit metrics, baselines
 │   │   ├── train.py              temporal pre-training loop, checkpoints
 │   │   └── bench.py              time and memory per scale x encoder x batch size
+│   ├── finetune/
+│   │   ├── labels.py             ground truth (laps to the next stop, compound, no more stops) from the Parquet data -> ft_labels.npz
+│   │   ├── scrub.py              removes the pit-stop fingerprints (in_pit, lap time, ...) from the input
+│   │   ├── dataset.py            labelled windows ending on a 10 s grid, season splits
+│   │   ├── model.py              backbone from best.pt, pre-training heads removed, new head, freeze modes
+│   │   ├── losses.py             masked BCE / Huber / cross-entropy, warm-up + cosine schedule
+│   │   ├── metrics.py            AUC, AP, F1, MAE, accuracy ... (numpy only)
+│   │   ├── baselines.py          prior, rule of thumb, gradient-boosted trees
+│   │   ├── train.py              fine-tuning loop (frozen mode: features computed once)
+│   │   └── evaluate.py           model vs baselines on a test season, per race
 │   └── pretrain/
 │       ├── schema.py             feature lists, task groups, leak maps, per-race normalisation
 │       ├── cache.py              Parquet datasets -> memory-mappable race caches
@@ -1619,6 +1817,7 @@ Formula-1/
 ├── tests/
 │   ├── unit/                     one module at a time
 │   ├── integration/              end to end, causality, CLI
+│   ├── finetune/                 labels, metrics, scrub levels, baselines (numpy); model, freeze modes, losses (torch)
 │   ├── pretrain/                 cache + race-cache readers, windows, task masks / leakage, encoders, contrastive, benchmark, training
 │   ├── live/                     real FastF1 API (deselected by default)
 │   ├── synthetic/                the synthetic FastF1 session used by all offline tests
@@ -1641,6 +1840,8 @@ Directories that scripts create (large ones are not meant to be committed; check
 | `cache/`                 | `pretrain.cache` | one memory-mappable cache directory per race (~118 MB each) |
 | `runs/pre1/`             | `pretrain.train` (removed) | the archived snapshot-model run: `best.pt`, `last.pt`, `log.jsonl`, `args.json` |
 | `runs/<name>/`           | `seqbert.train` | `best.pt` (best weights), `ckpt.pt` (latest evaluation point with optimiser, resumable), `args.json`, `log.jsonl` |
+| `cache/<race>/ft_labels.npz` | `finetune.labels` | fine-tuning labels per cache frame and car (laps to the next stop, compound, no more stops, valid) plus a raw strategy-feature table every 10 s |
+| `runs/ft_<name>/`        | `finetune.train` | `best.pt` (backbone + new head), `args.json`, `log.jsonl` with the validation metrics; `report_*.json` from `finetune.evaluate` |
 | `figures/`               | `seqbert.visualize` | the five report figures of the temporal model (copies used in this README live in `docs/images/seqbert-*.png`) |
 | `train.log`, `nohup.out` | `nohup` | console output of a training run / of an early scrape (`nohup.out` is git-ignored) |
 | `docs/docs/`             | by hand | project notes: see [Related work](#related-work) |
@@ -1659,6 +1860,10 @@ majority / mean baselines in the validation metrics, mixed-scale training (`--sc
 loss normalisation, gradient-norm logging and skipping of non-finite steps. The single-snapshot model (`pretrain/model.py`,
 `masking.py`, `losses.py`, `train.py`, `bench.py`) and its tests were removed (kept as an [archive](#archived-the-single-snapshot-model));
 the pre-training schema drops `official_position`, `pos_age_s` and `car_age_s` (leaks).
+
+**Supervised fine-tuning (also unreleased).** New `f1strategy.finetune` package (labels, scrub, dataset, model, losses, metrics, baselines, train, evaluate) and
+`tests/finetune`: labels for the next tyre-change stop cut from the Parquet data, input scrub levels, four freeze modes, a new head replacing the pre-training heads,
+season-based train / validation / test split and prior / rule / gradient-boosting baselines. Optional dependency: `scikit-learn` (only for the `gbdt` baseline).
 
 **0.4.0 (10 Hz and Parquet).** Two new driver features (`pos_age_s`, `car_age_s`, so 45 in total),
 `RaceGraphBuilder.snapshot()` (plain data; `build()` now wraps it and returns the same graph), `GraphExporter.export_snapshot()`
