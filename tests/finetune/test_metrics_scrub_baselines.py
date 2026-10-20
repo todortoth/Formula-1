@@ -22,7 +22,9 @@ def test_auc_and_ap_known_values():
 
 def test_regression_and_classification_metrics():
     r = M.regression_metrics(np.array([5, 10, 3.0]), np.array([6, 10, 1.0]))
-    assert r["mae"] == pytest.approx(1.0) and r["within1"] == pytest.approx(2 / 3) and r["bias"] == pytest.approx(-1 / 3)
+    assert (
+        r["mae"] == pytest.approx(1.0) and r["within1"] == pytest.approx(2 / 3) and r["bias"] == pytest.approx(-1 / 3)
+    )
     c = M.classification_metrics(np.array([0, 1, 2, 2]), np.array([0, 1, 2, 1]))
     assert c["acc"] == 0.75 and c["majority_acc"] == 0.5
 

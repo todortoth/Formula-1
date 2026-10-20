@@ -1623,7 +1623,6 @@ Formula-1/
 ├── pyproject.toml                packaging, dependencies, pytest / ruff / coverage config
 ├── requirements.txt              pip freeze of the author's environment (reference only)
 ├── scripts/
-│   ├── draw_finetune_figure.py   draws docs/images/fig6_finetune.png
 │   ├── generate_readme.py        renders README.md from docs/readme_template.md
 │   ├── scrape.sh                 starts one background scraping worker per season 2019-2025
 │   └── scrape_data.sh            scrapes one season, round by round, into parquet_datasets/

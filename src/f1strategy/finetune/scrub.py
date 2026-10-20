@@ -25,8 +25,14 @@ LEVELS = {
     "none": (),
     "basic": ("in_pit", "last_lap_time_s"),
     "strict": (
-        "in_pit", "last_lap_time_s", "lateral_offset_m", "heading_rel_track_sin", "heading_rel_track_cos", "on_track",
-        "stint", "pit_stops",
+        "in_pit",
+        "last_lap_time_s",
+        "lateral_offset_m",
+        "heading_rel_track_sin",
+        "heading_rel_track_cos",
+        "on_track",
+        "stint",
+        "pit_stops",
     ),  # fmt: skip
 }
 

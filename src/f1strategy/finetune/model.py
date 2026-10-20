@@ -142,7 +142,11 @@ class FtModel(nn.Module):
             if name == "cls":
                 parts.append(h[:, 0])
             elif name == "last":  # the last usable time step = the end of the sequence
-                idx = torch.where(ok, torch.arange(T, device=tok.device), torch.full_like(ok, -1, dtype=torch.long)).max(1).values
+                idx = (
+                    torch.where(ok, torch.arange(T, device=tok.device), torch.full_like(ok, -1, dtype=torch.long))
+                    .max(1)
+                    .values
+                )
                 parts.append(tok[torch.arange(len(tok)), idx.clamp(min=0)])
             elif name == "mean":
                 w = ok[..., None].to(tok.dtype)

@@ -21,7 +21,14 @@ from torch.utils.data import DataLoader, Dataset
 
 from f1strategy.finetune import metrics as M
 from f1strategy.finetune.dataset import (
-    DEFAULT_HOP_S, FtDataset, finetune_index, open_labelled_races, parse_years, targets_to_torch, to_masked_batch, window_targets,
+    DEFAULT_HOP_S,
+    FtDataset,
+    finetune_index,
+    open_labelled_races,
+    parse_years,
+    targets_to_torch,
+    to_masked_batch,
+    window_targets,
 )  # fmt: skip
 from f1strategy.finetune.losses import ft_loss, warmup_cosine
 from f1strategy.finetune.model import MODES, POOLS, TASKS, FtModel, HeadConfig, load_backbone
@@ -110,7 +117,9 @@ def select_score(rep: dict, tasks, horizons) -> float:
 def build_args(argv=None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--cache", required=True)
-    ap.add_argument("--init", required=True, help="pre-trained checkpoint (best.pt); architecture source also for --mode scratch")
+    ap.add_argument(
+        "--init", required=True, help="pre-trained checkpoint (best.pt); architecture source also for --mode scratch"
+    )
     ap.add_argument("--out", required=True)
     ap.add_argument("--scale", default="medium", choices=["medium", "long"], help="medium = 1 lap, long = 10 laps")
     ap.add_argument("--mode", default="frozen", choices=MODES)
@@ -127,12 +136,16 @@ def build_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--scrub-fill", default="zero", choices=["zero", "nan"])
     ap.add_argument("--train-years", default="2019-2024")
     ap.add_argument("--val-years", default="2025")
-    ap.add_argument("--hop-s", type=float, default=None, help="seconds between window ends (default 30 medium / 60 long)")
+    ap.add_argument(
+        "--hop-s", type=float, default=None, help="seconds between window ends (default 30 medium / 60 long)"
+    )
     ap.add_argument("--steps", type=int, default=3000)
     ap.add_argument("--batch-size", type=int, default=None)
     ap.add_argument("--lr-head", type=float, default=1e-3)
     ap.add_argument("--lr-backbone", type=float, default=2e-5)
-    ap.add_argument("--head-warmup-steps", type=int, default=0, help="full / partial: steps with the backbone at lr 0 first (LP-FT)")
+    ap.add_argument(
+        "--head-warmup-steps", type=int, default=0, help="full / partial: steps with the backbone at lr 0 first (LP-FT)"
+    )
     ap.add_argument("--warmup", type=int, default=100)
     ap.add_argument("--weight-decay", type=float, default=0.01)
     ap.add_argument("--grad-clip", type=float, default=1.0)
@@ -149,7 +162,9 @@ def main(argv=None) -> dict:
     a = build_args(argv)
     torch.manual_seed(a.seed)
     np.random.seed(a.seed)
-    device = torch.device("cuda" if a.device == "auto" and torch.cuda.is_available() else ("cpu" if a.device == "auto" else a.device))
+    device = torch.device(
+        "cuda" if a.device == "auto" and torch.cuda.is_available() else ("cpu" if a.device == "auto" else a.device)
+    )
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     tasks = tuple(t for t in a.tasks.split(",") if t)
@@ -158,7 +173,9 @@ def main(argv=None) -> dict:
     hc = HeadConfig(horizons=horizons, pool=a.pool, kind=a.head, hidden=a.head_hidden, layers=a.head_layers,
                     dropout=a.head_dropout, tasks=tasks)  # fmt: skip
 
-    backbone, ck = load_backbone(a.init, pretrained=a.mode != "scratch", dropout=a.dropout if a.mode != "frozen" else None)
+    backbone, ck = load_backbone(
+        a.init, pretrained=a.mode != "scratch", dropout=a.dropout if a.mode != "frozen" else None
+    )
     scale = resolve_scale(a.scale, ck)
     model = FtModel(backbone, hc)
     model.set_mode(a.mode, a.unfreeze_last)
@@ -180,7 +197,6 @@ def main(argv=None) -> dict:
     masker = SeqMasker(device=device)
     mk = lambda ds, shuffle: DataLoader(ds, bs, shuffle=shuffle, num_workers=a.workers, drop_last=shuffle)  # noqa: E731
     va_t = window_targets(va_ix, va_lab)
-    va_y = targets_to_torch(va_t)
 
     n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
     n_all = sum(p.numel() for p in model.parameters())
@@ -240,7 +256,11 @@ def main(argv=None) -> dict:
             step += 1
             rec = {"step": step, "loss": float(loss), "gnorm": float(gn), **{f"l_{k}": v for k, v in parts.items()}}
             if step % a.eval_every == 0 or step == a.steps:
-                feats = va_feat if a.mode == "frozen" else extract_features(model, mk(va_ds, False), masker, device, sid, cols, a.scrub_fill, a.amp)
+                feats = (
+                    va_feat
+                    if a.mode == "frozen"
+                    else extract_features(model, mk(va_ds, False), masker, device, sid, cols, a.scrub_fill, a.amp)
+                )
                 rep = evaluate(predict_head(model, feats, device))
                 score = select_score(rep, tasks, horizons)
                 rec |= {"val_score": score, "is_best": score > best} | M.flatten_report(rep)

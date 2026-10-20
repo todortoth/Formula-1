@@ -44,7 +44,9 @@ def open_labelled_races(cache: str | Path, years: set[int]) -> tuple[list[RaceCa
         if race_year(r) not in years:
             continue
         if not (Path(cache) / r.name / LABEL_FILE).exists():
-            warnings.warn(f"{r.name}: no {LABEL_FILE} (run python -m f1strategy.finetune.labels), skipped", stacklevel=2)
+            warnings.warn(
+                f"{r.name}: no {LABEL_FILE} (run python -m f1strategy.finetune.labels), skipped", stacklevel=2
+            )
             continue
         races.append(r)
         labels[r.name] = load_race_labels(Path(cache) / r.name)

@@ -143,7 +143,9 @@ def build_race_labels(ds_dir: Path, cache_dir: Path) -> dict[str, np.ndarray]:
     ds_dir, cache_dir = Path(ds_dir), Path(cache_dir)
     man = json.loads((ds_dir / "manifest.json").read_text())
     drv = pl.concat([pl.read_parquet(f, columns=DRV_COLS) for f in sorted((ds_dir / "drivers").glob("*.parquet"))])
-    glb = pl.concat([pl.read_parquet(f, columns=GLB_COLS + ["t"]) for f in sorted((ds_dir / "global").glob("*.parquet"))])
+    glb = pl.concat(
+        [pl.read_parquet(f, columns=GLB_COLS + ["t"]) for f in sorted((ds_dir / "global").glob("*.parquet"))]
+    )
     glb = glb.sort("frame")
     F = int(glb["frame"].max()) + 1
     D = max(22, int(drv["slot"].max()) + 1)
@@ -151,7 +153,9 @@ def build_race_labels(ds_dir: Path, cache_dir: Path) -> dict[str, np.ndarray]:
     pq_t[glb["frame"].to_numpy()] = glb["t"].to_numpy()
 
     d = {c: _dense(drv, c, F, D) for c in DRV_COLS if c not in ("frame", "t", "driver", "slot")}
-    cmp = compound_index(d["compound_soft"], d["compound_medium"], d["compound_hard"], d["compound_intermediate"], d["compound_wet"])
+    cmp = compound_index(
+        d["compound_soft"], d["compound_medium"], d["compound_hard"], d["compound_intermediate"], d["compound_wet"]
+    )
     g = {c: np.full(F, np.nan, dtype=np.float32) for c in GLB_COLS if c != "frame"}
     for c in g:
         g[c][glb["frame"].to_numpy()] = glb[c].to_numpy().astype(np.float32)

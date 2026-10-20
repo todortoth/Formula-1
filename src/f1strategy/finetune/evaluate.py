@@ -16,7 +16,14 @@ from torch.utils.data import DataLoader
 
 from f1strategy.finetune import metrics as M
 from f1strategy.finetune.baselines import run_baselines
-from f1strategy.finetune.dataset import DEFAULT_HOP_S, FtDataset, finetune_index, open_labelled_races, parse_years, window_targets
+from f1strategy.finetune.dataset import (
+    DEFAULT_HOP_S,
+    FtDataset,
+    finetune_index,
+    open_labelled_races,
+    parse_years,
+    window_targets,
+)
 from f1strategy.finetune.model import load_finetuned
 from f1strategy.finetune.train import decode_for_metrics, predict_windows, resolve_scale
 from f1strategy.seqbert.masking import SeqMasker
@@ -29,7 +36,17 @@ def subset(t: dict, mask_windows: np.ndarray) -> dict:
 
 
 def table(rows: dict[str, dict], horizons) -> str:
-    cols = [f"pit{horizons[0]}/auc", f"pit{horizons[0]}/ap", f"pit{horizons[0]}/f1_best", "laps/mae", "laps/within1", "laps/within2", "cmp/acc", "cmp/macro_f1", "nomore/auc"]
+    cols = [
+        f"pit{horizons[0]}/auc",
+        f"pit{horizons[0]}/ap",
+        f"pit{horizons[0]}/f1_best",
+        "laps/mae",
+        "laps/within1",
+        "laps/within2",
+        "cmp/acc",
+        "cmp/macro_f1",
+        "nomore/auc",
+    ]
     head = f"{'method':<14}" + "".join(f"{c.split('/')[0] + ' ' + c.split('/')[1]:>16}" for c in cols)
     lines = [head, "-" * len(head)]
     for n, r in rows.items():
@@ -51,7 +68,9 @@ def main(argv=None) -> dict:
     ap.add_argument("--device", default="auto")
     ap.add_argument("--workers", type=int, default=4)
     a = ap.parse_args(argv)
-    device = torch.device("cuda" if a.device == "auto" and torch.cuda.is_available() else ("cpu" if a.device == "auto" else a.device))
+    device = torch.device(
+        "cuda" if a.device == "auto" and torch.cuda.is_available() else ("cpu" if a.device == "auto" else a.device)
+    )
 
     model, ck = load_finetuned(a.run, device)
     horizons = tuple(model.hc.horizons)
@@ -64,7 +83,7 @@ def main(argv=None) -> dict:
     te_ix = finetune_index(te_races, scale, hop_s)
     te_t = window_targets(te_ix, te_lab)
     ds = FtDataset(te_ix, te_lab)
-    preds = predict_windows(model, DataLoader(ds, 16, num_workers=a.workers), SeqMasker(), device, scale.scale_id,
+    preds = predict_windows(model, DataLoader(ds, 16, num_workers=a.workers), SeqMasker(device=device), device, scale.scale_id,
                             ck["scrub_cols"], ck.get("scrub_fill", "zero"), a.amp)  # fmt: skip
     results = {f"model ({ck['mode']})": decode_for_metrics(preds)}
 
@@ -75,7 +94,9 @@ def main(argv=None) -> dict:
         results |= run_baselines(window_targets(tr_ix, tr_lab), te_t, horizons, tuple(names))
 
     reports = {n: M.summarize(p, te_t, horizons) for n, p in results.items()}
-    print(f"\n{len(te_races)} races {a.years}, {len(te_ix)} windows, {reports[next(iter(reports))]['n_samples']} (window, car) samples, scale {ck['scale']}\n")
+    print(
+        f"\n{len(te_races)} races {a.years}, {len(te_ix)} windows, {reports[next(iter(reports))]['n_samples']} (window, car) samples, scale {ck['scale']}\n"
+    )
     print(table(reports, horizons))
 
     by_race = {}

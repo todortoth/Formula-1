@@ -66,7 +66,14 @@ class Prior:
     def predict(self, t: dict, horizons=(5,)) -> dict:
         m, tab, *_ = _flat(t)
         n = len(tab)
-        return _pack(m, np.tile(self.rate, (n, 1)), np.full(n, self.laps), np.full(n, self.cmp), np.full(n, self.nomore), horizons)
+        return _pack(
+            m,
+            np.tile(self.rate, (n, 1)),
+            np.full(n, self.laps),
+            np.full(n, self.cmp),
+            np.full(n, self.nomore),
+            horizons,
+        )
 
 
 class Rule:
@@ -119,7 +126,13 @@ class Gbdt:
             s = rng.choice(len(tab), self.max_rows, replace=False)
             tab, laps, cmp, nomore = tab[s], laps[s], cmp[s], nomore[s]
         has = np.isfinite(laps)
-        kw = {"max_iter": 300, "learning_rate": 0.06, "max_leaf_nodes": 31, "l2_regularization": 1.0, "random_state": self.seed} | self.kw
+        kw = {
+            "max_iter": 300,
+            "learning_rate": 0.06,
+            "max_leaf_nodes": 31,
+            "l2_regularization": 1.0,
+            "random_state": self.seed,
+        } | self.kw
         self.pit = [C(**kw).fit(tab, has & (laps <= h)) for h in horizons]
         self.laps = R(loss="absolute_error", **kw).fit(tab[has], np.minimum(laps[has], 60.0))
         k = has & (cmp >= 0)
@@ -132,7 +145,9 @@ class Gbdt:
         pit = np.stack([mdl.predict_proba(tab)[:, 1] for mdl in self.pit], -1)
         proba = self.cmp.predict_proba(tab)
         nxt = self.cmp.classes_[proba.argmax(1)]
-        return _pack(m, pit, np.clip(self.laps.predict(tab), 1.0, 60.0), nxt, self.nomore.predict_proba(tab)[:, 1], horizons)
+        return _pack(
+            m, pit, np.clip(self.laps.predict(tab), 1.0, 60.0), nxt, self.nomore.predict_proba(tab)[:, 1], horizons
+        )
 
 
 def run_baselines(train_t: dict, test_t: dict, horizons=(5,), names=("prior", "rule", "gbdt")) -> dict[str, dict]:

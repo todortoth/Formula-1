@@ -17,7 +17,6 @@ def roc_auc(y: np.ndarray, s: np.ndarray) -> float:
     ss = s[order]
     ranks = np.empty(len(s))
     i = 0
-    r = 1.0
     while i < len(ss):  # average rank for ties
         j = i
         while j + 1 < len(ss) and ss[j + 1] == ss[i]:
@@ -133,7 +132,12 @@ def flatten_report(rep: dict) -> dict[str, float]:
     f: dict[str, float] = {}
     for k, v in rep.items():
         if k.startswith("pit") and isinstance(v, dict):
-            f[f"{k}/auc"], f[f"{k}/ap"], f[f"{k}/f1_best"], f[f"{k}/brier"] = v["auc"], v["ap"], v["f1_best"], v["brier"]
+            f[f"{k}/auc"], f[f"{k}/ap"], f[f"{k}/f1_best"], f[f"{k}/brier"] = (
+                v["auc"],
+                v["ap"],
+                v["f1_best"],
+                v["brier"],
+            )
     if "laps" in rep:
         for m in ("mae", "medae", "within1", "within2"):
             f[f"laps/{m}"] = rep["laps"][m]

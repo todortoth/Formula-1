@@ -2,7 +2,6 @@
 
 from types import SimpleNamespace
 
-import numpy as np
 import pytest
 
 torch = pytest.importorskip("torch")
@@ -59,7 +58,9 @@ def test_last_token_is_the_last_usable_frame():
     assert not torch.allclose(f_ok, f_bad)  # the unusable last frame is skipped, the previous token is read instead
 
 
-@pytest.mark.parametrize("mode,expect_backbone", [("frozen", False), ("partial", True), ("full", True), ("scratch", True)])
+@pytest.mark.parametrize(
+    "mode,expect_backbone", [("frozen", False), ("partial", True), ("full", True), ("scratch", True)]
+)
 def test_freeze_modes(mode, expect_backbone):
     m = make(mode)
     loss, _ = ft_loss(m(fake_batch(), 0), targets(), m.hc)
