@@ -76,6 +76,9 @@ representation-learning foundation for that.
   - [Baselines](#baselines)
   - [Seasons](#seasons)
   - [Running it](#running-it)
+  - [Class balance, metrics and thresholds](#class-balance-metrics-and-thresholds)
+  - [Experiments and results](#experiments-and-results-validation-2025)
+  - [Test season 2026](#test-season-2026-16-races)
   - [Status and limitations](#status-and-limitations)
 - **Archive - the single-snapshot model (code removed)**
   - [Archived: the single-snapshot model](#archived-the-single-snapshot-model)
@@ -154,7 +157,7 @@ from the lists in `pretrain/schema.py`.
   report figures included.
 - **Supervised fine-tuning.** `f1strategy.finetune` replaces the pre-training heads by a new head per car slot and learns three labelled
   pit-stop questions (pit within H laps, laps to the stop, compound received) from labels cut out of the Parquet data, with the stop's
-  fingerprints scrubbed from the input, four freeze modes (`frozen`, `partial`, `full`, `scratch`) and `prior` / `rule` / gradient-boosting baselines; trained on
+  fingerprints scrubbed from the input, four freeze modes (`frozen`, `partial`, `full`, `scratch`), a per-slot and a shared per-car head, and `prior` / `rule` / gradient-boosting baselines; trained on
   2019-2024, validated on 2025, tested on 2026.
 - **Animated GIF** of the same arrays (flag-coloured track, cars with trails, leaderboard, flag banner), next to the
   original point-by-point graphs and PNGs, which are unchanged.
@@ -1375,10 +1378,10 @@ answers to three questions about the **next tyre-change stop that begins after t
 
 | Task | Target | Output | Loss | Metrics |
 |---|---|---|---|---|
-| `pit` | does the car pit within the next H laps (default H = 5; several horizons allowed)? | one logit per horizon | masked BCE | ROC-AUC, average precision, best F1, Brier |
+| `pit` | does the car pit within the next H laps (default H = 5; several horizons allowed)? | one logit per horizon | masked BCE | ROC-AUC, average precision, F1 / precision / recall (threshold 0.5), best-threshold F1 (upper bound), Brier, positive rate |
 | `laps` | after how many laps is the stop? | `log1p(laps)` | Huber on the log scale | MAE, median AE, share within +-1 / +-2 laps |
-| `cmp` | which compound does the car receive (soft, medium, hard, intermediate, wet)? | 5 logits | masked cross-entropy | accuracy, macro-F1, confusion matrix, majority accuracy |
-| `nomore` | does the car make no further stop at all? | one logit | masked BCE (weight 0.5) | ROC-AUC |
+| `cmp` | which compound does the car receive (soft, medium, hard, intermediate, wet)? | 5 logits | masked cross-entropy | accuracy, macro-F1, per-class precision / recall / F1, confusion matrix, majority accuracy |
+| `nomore` | does the car make no further stop at all? | one logit | masked BCE (weight 0.5) | ROC-AUC, F1 / precision / recall, positive rate |
 
 * **Laps are counted the way a strategist counts them.** A car that has completed `c = lap_number - 1` laps and stops at the end
   of lap `L` has `L - c` laps to go: a sequence ending at the end of lap 10 with the stop in lap 22 has label **12**; the same car
@@ -1399,6 +1402,38 @@ answers to three questions about the **next tyre-change stop that begins after t
   `cache/<race>/ft_labels.npz` (labels at every cache frame, plus a table of raw strategy features every 10 s for the baselines).
   On the 2019 Australian GP it finds Hamilton's single stop (in-lap 15, medium after soft) and labels every frame before it
   with the laps to go (15 at the start, 1 in lap 15).
+
+### Class balance, metrics and thresholds
+
+The binary tasks are imbalanced: only 12-14 % of the (window, car) pairs pit within 5 laps, so "never pits" is 86-88 % accurate and the ROC-AUC can look comfortable while
+the actual decisions are poor. The report therefore shows, for every binary task, the positive rate next to AUC, average precision (AP, the area under the precision-recall curve),
+and F1 / precision / recall. A random or constant predictor has an AP equal to the positive rate and, if it calls everything positive, an F1 of `2p / (1 + p)`: **0.221** (pit5, 2026, 1-lap
+windows) and **0.236** (10-lap windows); these are the reference values for the F1 columns. The compound task is imbalanced as well (see below), so its accuracy is read against the majority class and
+next to the macro-F1, which averages over the classes that occur in the truth (a class with 19 samples counts as much as one with 12,000).
+
+**F1 depends on the decision threshold.** `evaluate` reports F1, precision and recall at the threshold 0.5. For a rare class that threshold is a poor choice: a model whose scores rank the cars well but whose
+probabilities rarely exceed 0.5 gets a tiny recall and an F1 near zero (the 10-lap model below: precision 0.91, recall 0.03) without being worse at ranking. F1 numbers of different methods are comparable only at thresholds
+chosen the same way: fit the threshold on the validation season (the F1-maximising one) and apply it unchanged to the test season, or compare AP and the best-threshold F1 (`f1_best`, an upper bound that uses the
+evaluated set itself). The threshold-free AP and `f1_best` are in the JSON reports; a validation-fitted threshold is not implemented yet.
+
+**Label distribution** (ground truth of the evaluated (window, car) pairs; `evaluate` prints it for every run). The 2025 row is derived from the base rates and counts of the validation report.
+
+| set | windows | pairs | pit5 positive | pit5 negative | pit5 rate | no-more positive | no-more negative | no-more rate |
+|---|---|---|---|---|---|---|---|---|
+| 2025 validation, 1 lap | 4,292 | 78,070 | 10,923 | 67,147 | 14.0 % | 32,123 | 45,947 | 41.1 % |
+| 2026 test, 1 lap | 3,024 | 54,681 | 6,778 | 47,903 | 12.4 % | 28,185 | 26,496 | 51.5 % |
+| 2026 test, 10 laps | 1,297 | 23,406 | 3,138 | 20,268 | 13.4 % | 13,700 | 9,706 | 58.5 % |
+
+| set | pairs with a next stop (laps task) | stops with a known compound | SOFT | MEDIUM | HARD | INTERMEDIATE | WET |
+|---|---|---|---|---|---|---|---|
+| 2025 validation, 1 lap | 45,947 | 45,682 | 9,256 (20.3 %) | 17,263 (37.8 %) | 17,554 (38.4 %) | 1,609 (3.5 %) | 0 |
+| 2026 test, 1 lap | 26,496 | 26,368 | 7,979 (30.3 %) | 6,511 (24.7 %) | 11,859 (45.0 %) | 19 (0.1 %) | 0 |
+| 2026 test, 10 laps | 9,706 | 9,654 | 3,440 (35.6 %) | 2,476 (25.7 %) | 3,738 (38.7 %) | 0 | 0 |
+
+* The training seasons' distribution is not tabulated here (run `evaluate --years 2019-2024`, or the label-distribution code on them).
+* **The 2026 labels differ from 2025:** fewer pit5 positives (12.4 % against 14.0 %) and many more cars without a further stop (51.5 % against 41.1 %), which fits a season with more one-stop races
+  (a hypothesis, not checked). A baseline that learned the old balance (`prior`, `rule`) is penalised by this shift.
+* **Compound:** no wet tyres at all in the 2026 test races and 19 intermediate samples on 1-lap windows (none on 10-lap windows), so the macro-F1 of the 1-lap and the 10-lap scale average over different class sets and are not comparable.
 
 ### Leak control of the input (`finetune/scrub.py`)
 
@@ -1430,8 +1465,14 @@ head reads a pooled embedding (`--pool cls_last`: the `[CLS]` vector and the las
 | `full` | everything; backbone at `--lr-backbone` (default 2e-5, small), head at `--lr-head` (1e-3) | the embedding may shift a little while the knowledge about race patterns is kept; `--head-warmup-steps N` trains the head alone for N steps first (linear probe, then fine-tune) |
 | `scratch` | everything, random weights, same architecture | control: what is pre-training worth? Use a larger `--lr-backbone` (e.g. 2e-4) |
 
-If a linear head on frozen features is too weak, the next step is `--head mlp --head-layers 2` (still frozen), and only then `partial` / `full`.
-The head has one output block per car slot, like the pre-training head, so slot *k* is read from the part of the embedding that describes slot *k*.
+The `linear` and `mlp` heads have one output block per car slot, like the pre-training head, so slot *k* is read from the part of the embedding that describes slot *k*.
+They turned out to be the weak point (see [the results](#experiments-and-results-validation-2025)), hence a third head:
+
+* **`--head car`** is one MLP **shared by all slots**. Its input per car is the car's own state at the end of the window (last usable frame, change since the first
+  usable frame, visibility mask; already scrubbed), the global race features and a projection of the pooled embedding (`--ctx-dim`, default 64); the per-slot linear read-out of
+  the embedding is added to the logits (`--no-slot-branch` drops it). The backbone and its pre-trained knowledge are untouched; shared weights mean that "tyre age 25 on
+  mediums" is learned once instead of once per slot. `--ctx-dim 0 --no-slot-branch` removes the embedding completely: a **tabular control** that shows what the sequence
+  embedding adds on top of the car's end-of-window state. In the experiments this control was the best configuration.
 
 ### Baselines
 
@@ -1443,43 +1484,57 @@ at the **end** of the window (that is what a strategist glances at), so any gain
 | `prior` | base rate, median laps, most frequent compound of the training seasons; no input |
 | `rule` | the rule of thumb: median stint length of the current compound (training seasons) minus the tyre age is the laps to go; next compound from a (current compound, stops so far) transition table |
 | `gbdt` | gradient-boosted trees (scikit-learn `HistGradientBoosting`, `pip install scikit-learn`) on the raw strategy features of the car and the race: tyre age, compound, stint, stops, position, gaps, pace, laps remaining, flags, weather, track length. The one to beat |
-| model, `scratch` | the same architecture without pre-training (what pre-training adds) |
-| model, `frozen` / `partial` / `full`, `--scrub none` | the freeze options and the fingerprint ablation |
+| model, per-slot `linear` / `mlp` heads, `frozen` / `partial` / `full` | what the pre-trained embedding alone can read out, and what moving the backbone adds |
+| model, `car` head with and without embedding | whether the embedding adds anything to the car's own end-of-window state |
+| model, `--mode scratch`, `--scrub none` | controls: what pre-training is worth, how much the stop fingerprints help (available, not run so far) |
 
 ### Seasons
 
-Training 2019-2024, validation 2025 (model selection), **test 2026** (`--train-years`, `--val-years`, `evaluate --years`). The test season was not in the pre-training corpus (2019-2025), so it is untouched by
+Training 2019-2024, validation 2025 (model selection; the pre-training saw these races without labels, so it is not a clean test), **test 2026** (`--train-years`, `--val-years`, `evaluate --years`). The test season was not in the pre-training corpus (2019-2025), so it is untouched by
 both stages. `train.py` never reads the test seasons. 2026 is a new regulation season (new cars, 22 cars on the grid, new tyre allocations),
 so a drop against 2025 is expected and is itself a result. The 2026 races have to be scraped and cached like the others
 (`scripts/scrape_data.sh 2026`, then `pretrain.cache`, then `finetune.labels`; `scrape.sh` covers 2019-2025 only).
 
 ### Running it
 
+The recipe that came out of the experiments below (frozen backbone, shared per-car head, no embedding; 1-lap windows as the main scale, 10-lap windows as a second scale; three seeds):
+
 ```bash
-# 0) labels next to every cache (2019-2026), reads parquet_datasets/ and cache/
+# 0) labels next to every cache, reads parquet_datasets/ and cache/ (add --only 2026 once the 2026 races are cached)
 python -m f1strategy.finetune.labels --parquet parquet_datasets --cache cache
 
-# 1) frozen backbone, linear head: minutes; then the same with an MLP head
-python -m f1strategy.finetune.train --cache cache --init runs/mixed_gnn/best.pt --out runs/ft_medium_frozen \
-    --scale medium --mode frozen --head linear --tasks pit,laps,cmp,nomore --horizons 5 --amp
-python -m f1strategy.finetune.train --cache cache --init runs/mixed_gnn/best.pt --out runs/ft_medium_frozen_mlp \
-    --scale medium --mode frozen --head mlp --head-layers 2 --amp
+# 1) main configuration, 1-lap windows: ~80 s per seed, the pooled features are computed once (~30 s)
+for s in 0 1 2; do
+python -m f1strategy.finetune.train --cache cache --init runs/mixed_gnn/best.pt --out runs/final_tab_s$s \
+    --scale medium --mode frozen --head car --ctx-dim 0 --no-slot-branch --steps 3000 --eval-every 100 --seed $s --amp
+done
 
-# 2) let the backbone move a little (smaller learning rate), head warm-up first
-python -m f1strategy.finetune.train --cache cache --init runs/mixed_gnn/best.pt --out runs/ft_medium_full \
-    --scale medium --mode full --head mlp --lr-backbone 2e-5 --lr-head 1e-3 --head-warmup-steps 300 --steps 4000 --amp --workers 8
+# 2) 10-lap windows (a separate scale: see the results for how to read it)
+for s in 0 1 2; do
+python -m f1strategy.finetune.train --cache cache --init runs/mixed_gnn/best.pt --out runs/final_long_tab_s$s \
+    --scale long --mode frozen --head car --ctx-dim 0 --no-slot-branch --steps 600 --eval-every 50 --seed $s --amp
+done
 
-# 3) controls: no pre-training, fingerprints left in
-python -m f1strategy.finetune.train --cache cache --init runs/mixed_gnn/best.pt --out runs/ft_medium_scratch \
-    --scale medium --mode scratch --head mlp --lr-backbone 2e-4 --steps 4000 --amp --workers 8
-python -m f1strategy.finetune.train --cache cache --init runs/mixed_gnn/best.pt --out runs/ft_medium_noscrub \
-    --scale medium --mode full --head mlp --scrub none --steps 4000 --amp --workers 8
+# 3) with the pre-trained embedding as context (regularised); optional, this is the pre-training's contribution
+for s in 0 1 2; do
+python -m f1strategy.finetune.train --cache cache --init runs/mixed_gnn/best.pt --out runs/final_long_emb_s$s \
+    --scale long --mode frozen --head car --ctx-dim 16 --no-slot-branch --head-dropout 0.3 --weight-decay 0.05 \
+    --steps 300 --eval-every 25 --seed $s --amp
+done
 
-# 4) 10-lap sequences: the same with --scale long (batch 16)
-# 5) test season 2026: the model next to prior / rule / gbdt, overall and per race
-python -m f1strategy.finetune.evaluate --cache cache --run runs/ft_medium_full/best.pt --years 2026 --report report_medium_full.json
+# 4) the model next to prior / rule / gbdt, overall and per race. gbdt uses every core: limit it.
+for s in 0 1 2; do
+OMP_NUM_THREADS=4 python -m f1strategy.finetune.evaluate --cache cache --run runs/final_tab_s$s/best.pt \
+    --years 2025 --train-years 2019-2024 --report val2025_tab_s$s.json        # validation season
+done
+# test season, once, after the configuration is fixed:
+#   ... evaluate --run runs/final_tab_s$s/best.pt --years 2026 --train-years 2019-2024 --report test2026_tab_s$s.json
 python -m pytest tests/finetune
 ```
+
+The other configurations of the experiments (per-slot heads, `partial` / `full`) are the same command with `--head linear|mlp`, `--mode partial|full` (see the options below; for `full`
+use `--lr-backbone 1e-5 --head-warmup-steps 300`). `--mode scratch` (random weights) and `--scrub none` / `strict` exist as controls but have not been run.
+Always pass the same `--train-years` to `evaluate` as to `train`: the baselines are fitted on those seasons.
 
 | Option (`finetune.train`) | Default | Meaning |
 |---|---|---|
@@ -1487,7 +1542,8 @@ python -m pytest tests/finetune
 | `--scale` | `medium` | `medium` (1 lap) / `long` (10 laps) |
 | `--mode`, `--unfreeze-last` | `frozen`, 2 | see [freeze modes](#freeze-modes-how-much-of-the-pre-trained-model-may-change) |
 | `--tasks`, `--horizons`, `--loss-weights` | all four, `5`, `nomore=0.5` | which losses are trained; laps for the "within H laps" question (`3,5,10` trains three logits); loss weights |
-| `--head`, `--head-hidden`, `--head-layers`, `--head-dropout`, `--pool` | `linear`, 512, 1, 0.1, `cls_last` | head shape (`linear` = one layer, `mlp` = hidden layers) and pooling (`cls`, `last`, `mean`, `cls_last`, `cls_last_mean`) |
+| `--head`, `--head-hidden`, `--head-layers`, `--head-dropout`, `--pool` | `linear`, 512, 1, 0.1, `cls_last` | head shape (`linear` = one layer, `mlp` = hidden layers, `car` = shared per-car MLP) and pooling (`cls`, `last`, `mean`, `cls_last`, `cls_last_mean`) |
+| `--ctx-dim`, `--no-slot-branch` | 64, off | `car` head only: width of the embedding context (0 = no embedding, tabular control); drop the per-slot read-out |
 | `--scrub`, `--scrub-fill` | `basic`, `zero` | leak control of the input, see above |
 | `--train-years`, `--val-years`, `--hop-s` | `2019-2024`, `2025`, 30 s / 60 s | season split and spacing of the window ends |
 | `--steps`, `--batch-size`, `--eval-every` | 3000, 32 / 16, 250 | optimiser steps (frozen mode: head steps on precomputed features), samples per step, validation interval |
@@ -1497,17 +1553,127 @@ python -m pytest tests/finetune
 `best.pt` of a run holds backbone + head weights and everything `evaluate.py` needs (head config, scale, scrub columns); the checkpoint with the best validation
 score (ROC-AUC of the first horizon, else laps MAE, else compound accuracy) is kept. `log.jsonl` has the losses and every validation metric.
 
+### Experiments and results (validation 2025)
+
+Everything below is **validation**: trained on 2019-2024 (125 races), checkpoint chosen and scored on 2025 (24 races). The pre-training had seen the 2025 races (without labels), and the
+checkpoint of every run was selected on the same 2025 windows, so model numbers are, if anything, slightly optimistic; the baselines are fitted on 2019-2024 only. The 2026 test has not been run yet.
+Seeds change the initialisation and the shuffling of the head only (the backbone is frozen). Metrics: see [the tasks](#the-tasks-and-how-the-labels-are-cut).
+
+**1-lap windows (`medium`): 4,292 windows, 78,070 (window, car) pairs.** Three seeds are reported as the mean.
+
+| | pit5 AUC | pit5 AP | laps MAE | compound acc | no-more AUC |
+|---|---|---|---|---|---|
+| `prior` | 0.500 | 0.180 | 7.83 | 0.384 | 0.500 |
+| `rule` (median stint - tyre age) | 0.684 | 0.237 | 7.19 | 0.558 | **0.940** |
+| `gbdt` (tabular, end-of-window state) | **0.792** | 0.414 | 6.49 | 0.537 | 0.927 |
+| per-slot `linear` head on the embedding, frozen (validation log) | 0.638 | - | 8.71 | 0.442 | 0.838 |
+| per-slot `mlp` head (2 layers), frozen | 0.642 | 0.237 | 7.35 | 0.440 | 0.853 |
+| per-slot `mlp` head, `partial` (last 2 layers) | 0.637 | 0.234 | 7.79 | 0.449 | 0.863 |
+| per-slot `mlp` head, `full` | 0.626 | 0.225 | 8.05 | 0.467 | 0.866 |
+| `car` head with embedding (context 64 + per-slot branch), frozen | 0.777 | 0.414 | 6.69 | 0.543 | 0.906 |
+| `car` head, regularised embedding (context 16, dropout 0.3, validation log) | 0.780 | - | 6.20 | 0.525 | 0.916 |
+| **`car` head, no embedding**, 3 seeds, 3000 steps | 0.782 | **0.426** | **6.21** | **0.576** | 0.922 |
+
+The three seeds of the last row: pit5 AUC 0.784 / 0.782 / 0.779, AP 0.429 / 0.426 / 0.422, laps MAE 6.213 / 6.211 / 6.219, compound accuracy 0.574 / 0.576 / 0.577. The same head
+trained for 2,000 steps instead of 3,000 gave 0.779 / 0.422 / 6.19 / **0.590** / 0.929: the compound accuracy falls with longer training while the pit5 AUC (which selects `best.pt`) still creeps up.
+
+**10-lap windows (`long`): 1,838 windows, 33,246 pairs.** A 10-lap window can only end after about lap 10, so these are different (later, easier) samples with a different base rate:
+the numbers of the two scales must not be compared with each other, only with the `gbdt` of the same scale.
+
+| | pit5 AUC | pit5 AP | laps MAE | compound acc | no-more AUC |
+|---|---|---|---|---|---|
+| `prior` | 0.500 | 0.150 | 7.22 | 0.359 | 0.500 |
+| `rule` | 0.700 | 0.242 | 6.76 | 0.508 | **0.928** |
+| `gbdt` | **0.794** | 0.414 | 5.79 | 0.513 | 0.914 |
+| `car` head, **no embedding**, 3 seeds, 600 steps | 0.786 | 0.425 | **5.62** | 0.577 | 0.912 |
+| `car` head, regularised embedding (context 16), 3 seeds, 300 steps | 0.779 | 0.420 | 5.65 | **0.591** | 0.895 |
+| `car` head, embedding context 64 + per-slot branch, 1 seed, 600 steps (peak at step 200: 0.790, then over-fits) | 0.790 | **0.437** | 6.26 | 0.550 | 0.889 |
+
+Three seeds, no embedding: pit5 AUC 0.785 / 0.787 / 0.785, laps MAE 5.615 / 5.600 / 5.648, compound 0.578 / 0.576 / 0.576. With the regularised embedding: pit5 AUC 0.783 / 0.777 / 0.777,
+laps MAE 5.723 / 5.687 / 5.531, compound 0.592 / 0.583 / 0.598.
+
+**What the experiments say**
+
+1. **A per-slot read-out of the pooled embedding is not enough.** The `linear` and `mlp` heads, in every freeze mode, stay below the rule of thumb (pit5 AUC 0.63-0.64 against 0.68). The pre-training log
+   pointed the same way: its tyre-set task only reached about 5 laps of tyre-age error (8.9 for the mean), so the embedding carries the tyre state coarsely. It is not a label problem: the slot order of
+   cache and labels was checked (identical driver codes, per-slot tyre-age correlation 1.0 on three races).
+2. **Unfreezing the backbone does not help.** `partial` and `full` are worse than `frozen` (0.637 and 0.626 against 0.642): the training loss keeps falling while the validation score stays flat or
+   drops, 24,000 strongly correlated windows from 125 races are too few to move 16 M parameters.
+3. **What works is the car's own state, read by a head shared across slots.** The `car` head with the embedding removed reaches the gradient-boosting level (pit5 AUC 0.782 against 0.792, a
+   0.01 gap that is larger than the seed spread of about 0.003) and beats `gbdt` on average precision (+0.012), laps MAE (6.21 against 6.49) and compound accuracy (0.576 against 0.537).
+   It adds only the change of the car's features over the window (e.g. tyre age, position, pace between the first and the last frame) to what `gbdt` sees.
+4. **On 1-lap windows the pre-trained embedding adds nothing, and hurts when used freely.** With the embedding the validation score peaks after about 300 steps while the training loss keeps
+   falling (probably over-fitting to race-specific information in the embedding; not verified); a smaller, regularised context removes most of the damage but does not beat the control.
+5. **The 10-lap scale does not change that picture.** Against the `gbdt` of the same scale the deficit in pit5 AUC is the same as on one lap (-0.008 against -0.010), the gain in laps MAE is smaller
+   (-0.17 against -0.28), the gain in compound accuracy larger (+0.064 against +0.039). The longer context is therefore not clearly exploited by this head. The regularised embedding gives the
+   **only consistent gain from pre-training that we found**: compound accuracy 0.591 against 0.577 on 10-lap windows (all three embedding seeds above all three control seeds), at the price of
+   pit5 AUC (-0.007) and no-more AUC (-0.017). The two configurations also differ in steps and regularisation, so this is suggestive, not proven.
+6. **"No more stops" is best answered by the rule.** Predicting a stop beyond the chequered flag from `median stint - tyre age` and the laps remaining gives AUC 0.940 / 0.928, above every learned model (0.92 / 0.91).
+7. **Races differ a lot.** The per-race table of `evaluate` (`--report`) showed for the weak `mlp` model a pit5 AUC between 0.33 (2025 round 10, where the rule reaches 0.71) and 0.85; with 24 validation races, compare
+   methods race by race, not only on the pooled number.
+8. **Practical.** The pooled features of 24,000 windows take about 30 s, one head trains in about a minute (frozen mode); a full backbone fine-tuning takes 4-5 minutes for 2,000 steps. `best.pt` is chosen on the pit5 AUC only, so the other
+   tasks are those of that step (read them from `log.jsonl`, or train one task per run with `--tasks`). `gbdt` uses every CPU core (`OMP_NUM_THREADS=4`).
+
+**Not run (yet):** the regularised embedding variants on the 2026 test season, F1 at a threshold fitted on the validation season, `partial` / `full` with the `car` head, `--mode scratch`, the scrub ablations (`--scrub none` / `strict`), per-task checkpoints, an ensemble of the three seeds.
+The `partial` / `full` runs used the default seasons (2019-2024 / 2025) like all the others.
+
+### Test season 2026 (16 races)
+
+Run once on all 16 races of 2026 that were available (1-lap windows: 3,024 windows, 54,681 pairs; 10-lap windows: 1,297 windows, 23,406 pairs), after the configuration was fixed on the validation season (`car` head, no embedding, frozen backbone, 3 seeds).
+Baselines are fitted on 2019-2024. The pre-training never saw 2026, and nothing here was tuned on it. The model rows are the mean of three seeds; F1, precision and recall are at the threshold 0.5 (see
+[Class balance, metrics and thresholds](#class-balance-metrics-and-thresholds)).
+
+**1-lap windows**
+
+| | pit5 AUC | pit5 F1 | pit5 precision | pit5 recall | laps MAE | compound acc | compound macro-F1 | no-more AUC | no-more F1 |
+|---|---|---|---|---|---|---|---|---|---|
+| `prior` | 0.500 | 0.000 | 0.000 | 0.000 | 6.73 | 0.450 | 0.155 | 0.500 | 0.000 |
+| `rule` | 0.687 | 0.272 | 0.208 | 0.392 | 6.45 | 0.582 | 0.341 | 0.842 | 0.474 |
+| `gbdt` | **0.775** | **0.363** | 0.395 | **0.335** | **5.83** | 0.585 | 0.425 | 0.882 | 0.771 |
+| model (`car` head, no embedding), 3 seeds | 0.773 | 0.260 | **0.581** | 0.167 | 5.99 | **0.593** | **0.428** | **0.886** | **0.805** |
+
+**10-lap windows**
+
+| | pit5 AUC | pit5 F1 | pit5 precision | pit5 recall | laps MAE | compound acc | compound macro-F1 | no-more AUC | no-more F1 |
+|---|---|---|---|---|---|---|---|---|---|
+| `prior` | 0.500 | 0.000 | 0.000 | 0.000 | 6.02 | 0.387 | 0.186 | 0.500 | 0.738 |
+| `rule` | 0.674 | 0.274 | 0.210 | 0.393 | 6.21 | 0.524 | 0.427 | 0.824 | 0.515 |
+| `gbdt` | 0.782 | **0.379** | 0.416 | **0.348** | **5.18** | 0.582 | 0.572 | **0.854** | 0.776 |
+| model (`car` head, no embedding), 3 seeds | **0.784** | 0.060 | **0.912** | 0.031 | 5.21 | **0.610** | **0.611** | 0.851 | **0.800** |
+
+Reference F1 of "everything is a stop": 0.221 (1 lap) / 0.236 (10 laps) for pit5; 0.680 / 0.738 for no-more. The `prior` no-more F1 of 0.738 on 10-lap windows is exactly this reference (its training base rate lies above 0.5).
+Spread over the three seeds: pit5 AUC 0.771-0.776 (1 lap), 0.781-0.786 (10 laps); laps MAE 5.92-6.09 and 5.18-5.25; compound accuracy 0.585-0.606 and 0.610.
+
+**What the test says**
+
+1. **The model ranks stops as well as gradient boosting, not better.** pit5 AUC 0.773 against 0.775 on one lap and 0.784 against 0.782 on ten laps, within a seed spread of about 0.003. On validation the model was 0.010 behind on one lap; that gap closed.
+2. **The favourable preliminary result did not survive.** On the first 5 races the 10-lap model led by 0.04 AUC (0.860 against 0.818) and the laps MAE by 0.3; with all 16 races both advantages are gone (0.784 against 0.782; 5.21 against 5.18).
+   Five races are not a test set: the per-race spread of the pit5 AUC is large (0.33-0.85 on validation).
+3. **F1 at 0.5 favours the gradient boosting, but mostly through the threshold.** On pit5 the model's precision is high and its recall low (0.58 / 0.17 on one lap; 0.91 / 0.03 on ten laps): its probabilities stay below 0.5 for most
+   real stops, while the ranking (AUC, and on validation the best-threshold F1 of 0.46 for both) is equal to `gbdt`. A threshold fitted on the validation season is needed before the F1 columns can separate the two; the
+   `prior` and `rule` rows show what a bad threshold or a bad model gives (F1 0.00 / 0.27).
+4. **Laps to the next stop:** the model is slightly worse than `gbdt` on one lap (MAE 5.99 against 5.83; seed spread about +-0.08) and equal on ten laps (5.21 against 5.18). The validation advantage (-0.28 / -0.17 laps) did not carry over to 2026.
+5. **Compound:** all three methods are at the level of the tyre rule on one lap (accuracy 0.59 / 0.585 / 0.582, majority class 0.45). On ten laps the model is ahead (accuracy 0.610 against 0.582 for `gbdt`, 0.524 for the rule; macro-F1 0.611 against 0.572, over three classes),
+   the same direction as on validation (+0.064 accuracy) and the one place where the model clearly beats gradient boosting.
+6. **No more stops:** the model is on par or slightly ahead (AUC 0.886 / 0.851 against 0.882 / 0.854; F1 0.805 / 0.800 against 0.771 / 0.776, classes balanced so 0.5 is a fair threshold). The rule of thumb fell from 0.94 / 0.93 AUC on validation to 0.84 / 0.82 when the
+   share of cars without a further stop rose from 41 % to 52 %.
+7. **In short:** a frozen, embedding-free per-car head matches a tuned gradient-boosting model on a new season; it neither beats it on ranking nor suffers more from the regulation change. The pre-trained embedding is not part of this model; the regularised
+   embedding variant has not been run on 2026.
+
 ### Status and limitations
 
-* **Implemented and partly tested.** The label logic (the 12 / 5 example, penalties, pit lane, retirements), metrics, scrub levels and the `prior` / `rule` /
-  `gbdt` baselines are covered by `tests/finetune` (numpy only); the label builder was run on the 2019 Australian GP Parquet dataset. `tests/finetune/test_model.py` (shapes,
-  pooling, freeze modes, losses) needs PyTorch and the temporal package, and the training / evaluation scripts have **not been run on the corpus yet**: there are no
-  results to report, and the first run will show whether the assumptions below hold.
-* **Two assumptions about code outside this stage.** The scrub overwrites columns of `raw["drv"]` with a constant before `SeqMasker.plain`; `--scrub-fill nan` additionally
-  relies on `plain` treating NaN as missing, as the cache does. Slot indices of the labels are the Parquet `slot` column, the same slots as in the cache.
-* **Per-slot head.** Slots are alphabetical per race, so slot *k* is a different driver in every race; the head must read slot *k*'s block of the embedding, which the
-  pre-training head had to do as well. If a linear head is too weak, `mlp` or `partial` / `full` give it room.
-* **Sample counts are correlated.** One window labels up to 22 cars and neighbouring windows overlap; the effective sample size is much smaller than the number of (window, car) pairs. Compare methods on the same test races and read the per-race table of `evaluate.py`.
+* **Implemented, tested and run on the corpus.** `tests/finetune` (23 tests: the label logic with the 12 / 5 example, penalties, pit lane and retirements; metrics; scrub levels; the baselines;
+  the model, pooling, freeze modes, the per-slot and the per-car head) passes. Labels, training and evaluation were run on 2019-2025 (results above), and once on the 2026 test season (below).
+* **Checked assumptions about code outside this stage.** The scrub overwrites columns of `raw["drv"]` with a constant before `SeqMasker.plain` (`--scrub-fill zero`, used in all runs; `nan` is untested);
+  the slot indices of the labels (the Parquet `slot` column) are the slots of the cache.
+* **What the model really is.** The best configuration reads the car's own end-of-window state (and its change over the window) with a head shared by all slots; the pre-trained backbone is frozen
+  and its embedding is not used. It matches gradient boosting rather than beating it, and the pre-training's contribution is, so far, a small gain in compound accuracy on 10-lap windows.
+* **Per-slot heads.** Slots are alphabetical per race, so slot *k* is a different driver in every race; reading slot *k* from a pooled vector was the weak point of the `linear` / `mlp` heads.
+* **Sample counts are correlated.** One window labels up to 22 cars and neighbouring windows overlap (30 s apart on one lap, 60 s on ten laps); the effective sample size is much smaller than the number of
+  (window, car) pairs. Compare methods on the same races and read the per-race table of `evaluate.py`.
+* **Validation is not independent.** The pre-training saw 2025 without labels and the checkpoints are selected on it; the 2026 test season is the clean number.
+* **Class balance.** Positives are rare (12-14 % for pit5), so F1 at a fixed threshold, AP and AUC can tell different stories; see [Class balance, metrics and thresholds](#class-balance-metrics-and-thresholds). The 2026 season has a different label balance from 2025.
+* **Different samples per scale.** 10-lap windows end after lap 10 at the earliest; scale results are compared with the `gbdt` of the same scale only.
 * **The label is conditional where it must be.** `laps` and `cmp` are scored only where a next stop exists; a car without one is covered by `nomore`.
 * **Rare cases.** Red-flag stops, cars that stop twice in a few laps, wet races (intermediate / wet are rare classes) and safety-car stops (cheap stops are not predictable from the sequence) are in the data as they are.
 

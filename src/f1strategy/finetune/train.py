@@ -54,7 +54,7 @@ def param_groups(model: FtModel, lr_head: float, lr_backbone: float, wd: float) 
         return [{"params": dec, "weight_decay": wd}, {"params": nod, "weight_decay": 0.0}]
 
     groups = []
-    for g in split(list(model.head.parameters())):
+    for g in split(model.head_params()):
         groups.append(g | {"lr": lr_head, "base_lr": lr_head, "kind": "head"})
     bb = model.backbone_params()
     if bb:
@@ -127,7 +127,18 @@ def build_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--tasks", default=",".join(TASKS), help="comma list of: pit, laps, cmp, nomore")
     ap.add_argument("--horizons", default="5", help="laps for 'pits within the next H laps' (comma list)")
     ap.add_argument("--loss-weights", default="", help="e.g. pit=1,laps=1,cmp=1,nomore=0.5")
-    ap.add_argument("--head", default="linear", choices=["linear", "mlp"])
+    ap.add_argument(
+        "--head",
+        default="linear",
+        choices=["linear", "mlp", "car"],
+        help="car = shared per-car MLP on the car's end-of-window state + the embedding",
+    )
+    ap.add_argument(
+        "--ctx-dim", type=int, default=64, help="car head: embedding context width; 0 = no embedding (tabular control)"
+    )
+    ap.add_argument(
+        "--no-slot-branch", action="store_true", help="car head: drop the per-slot linear read-out of the embedding"
+    )
     ap.add_argument("--head-hidden", type=int, default=512)
     ap.add_argument("--head-layers", type=int, default=1)
     ap.add_argument("--head-dropout", type=float, default=0.1)
@@ -171,15 +182,14 @@ def main(argv=None) -> dict:
     horizons = tuple(int(h) for h in a.horizons.split(","))
     weights = {k: float(v) for k, v in (kv.split("=") for kv in a.loss_weights.split(",") if kv)}
     hc = HeadConfig(horizons=horizons, pool=a.pool, kind=a.head, hidden=a.head_hidden, layers=a.head_layers,
-                    dropout=a.head_dropout, tasks=tasks)  # fmt: skip
+                    dropout=a.head_dropout, tasks=tasks, ctx_dim=a.ctx_dim, slot_branch=not a.no_slot_branch)  # fmt: skip
 
     backbone, ck = load_backbone(
         a.init, pretrained=a.mode != "scratch", dropout=a.dropout if a.mode != "frozen" else None
     )
     scale = resolve_scale(a.scale, ck)
-    model = FtModel(backbone, hc)
+    model = FtModel(backbone, hc).to(device)
     model.set_mode(a.mode, a.unfreeze_last)
-    model = model.to(device)
 
     tr_races, tr_lab = open_labelled_races(a.cache, parse_years(a.train_years))
     va_races, va_lab = open_labelled_races(a.cache, parse_years(a.val_years))

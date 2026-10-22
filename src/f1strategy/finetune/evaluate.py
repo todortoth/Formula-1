@@ -36,23 +36,69 @@ def subset(t: dict, mask_windows: np.ndarray) -> dict:
 
 
 def table(rows: dict[str, dict], horizons) -> str:
+    h = horizons[0]
     cols = [
-        f"pit{horizons[0]}/auc",
-        f"pit{horizons[0]}/ap",
-        f"pit{horizons[0]}/f1_best",
+        f"pit{h}/auc",
+        f"pit{h}/f1",
+        f"pit{h}/precision",
+        f"pit{h}/recall",
+        f"pit{h}/positive_rate",
         "laps/mae",
-        "laps/within1",
-        "laps/within2",
         "cmp/acc",
         "cmp/macro_f1",
         "nomore/auc",
+        "nomore/f1",
+        "nomore/precision",
+        "nomore/recall",
+        "nomore/positive_rate",
     ]
-    head = f"{'method':<14}" + "".join(f"{c.split('/')[0] + ' ' + c.split('/')[1]:>16}" for c in cols)
+
+    head = f"{'method':<20}" + "".join(f"{c:>13}" for c in cols)
     lines = [head, "-" * len(head)]
-    for n, r in rows.items():
-        f = M.flatten_report(r)
-        lines.append(f"{n:<14}" + "".join(f"{f.get(c, float('nan')):>16.3f}" for c in cols))
+
+    for name, report in rows.items():
+        flat = M.flatten_report(report)
+        values = []
+
+        for col in cols:
+            value = flat.get(col, float("nan"))
+            if col.endswith("/positive_rate"):
+                values.append(f"{value:>12.1%} ")
+            else:
+                values.append(f"{value:>13.3f}")
+
+        lines.append(f"{name:<20}" + "".join(values))
+
     return "\n".join(lines)
+
+
+def print_label_distribution(report: dict) -> None:
+    print("\nLabel distribution (ground truth)")
+    print("-" * 78)
+
+    for task, values in report.items():
+        if not isinstance(values, dict):
+            continue
+
+        if "positive_count" in values:
+            print(
+                f"{task:<12} "
+                f"positive={values['positive_count']:>8} "
+                f"({values['positive_rate']:>7.2%})  "
+                f"negative={values['negative_count']:>8} "
+                f"({values['negative_rate']:>7.2%})  "
+                f"n={values['n']:>8}"
+            )
+
+        elif "class_counts" in values:
+            print(f"{task}: n={values['n']}")
+            for name, count, rate in zip(
+                values["classes"],
+                values["class_counts"],
+                values["class_rates"],
+                strict=False,
+            ):
+                print(f"  {name:<18} {count:>8} ({rate:>7.2%})")
 
 
 def main(argv=None) -> dict:
@@ -98,6 +144,8 @@ def main(argv=None) -> dict:
         f"\n{len(te_races)} races {a.years}, {len(te_ix)} windows, {reports[next(iter(reports))]['n_samples']} (window, car) samples, scale {ck['scale']}\n"
     )
     print(table(reports, horizons))
+
+    print_label_distribution(reports[next(iter(reports))])
 
     by_race = {}
     for ri, r in enumerate(te_races):

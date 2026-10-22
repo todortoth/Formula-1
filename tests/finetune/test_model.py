@@ -85,3 +85,30 @@ def test_mlp_head_and_task_subset():
     m = make(kind="mlp", layers=2, hidden=16, tasks=("laps",))
     loss, parts = ft_loss(m(fake_batch(), 0), targets(), m.hc)
     assert set(parts) == {"laps"} and torch.isfinite(loss)
+
+
+def test_car_head_uses_the_cars_own_state_and_shares_weights():
+    m = make(kind="car", hidden=16, ctx_dim=8).eval()
+    b = fake_batch()
+    out = m(b, 0)
+    assert out["pit"].shape == (B, D, 1) and m.feat_dim == m.pool_dim + D * 3 * S.F_DRIVER + S.F_GLOBAL
+    b2 = fake_batch()
+    b2.drv_x = b2.drv_x.clone()
+    b2.drv_x[:, -1, 3] += 5.0  # change car 3 in the last frame only
+    d = (m(b2, 0)["laps"] - out["laps"]).abs()
+    assert d[:, 3].min() > 0  # the car whose state changed reacts
+
+
+def test_car_head_without_embedding_is_a_pure_tabular_control():
+    m = make(kind="car", hidden=16, ctx_dim=0).eval()
+    assert m.head.ctx is None and m.head.slot is None
+    b = fake_batch()
+    out1 = m(b, 0)["laps"]
+    m.backbone.cls.data.add_(1.0)  # the backbone does not matter any more
+    assert torch.allclose(m(b, 0)["laps"], out1)
+
+
+def test_all_head_parameters_are_in_head_params():
+    m = make(kind="car", hidden=16, ctx_dim=8)
+    assert {id(p) for p in m.head_params()} == {id(p) for p in m.head.parameters()}
+    assert any(p is m.head.slot.weight for p in m.head_params())
