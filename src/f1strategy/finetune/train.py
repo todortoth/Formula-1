@@ -33,6 +33,7 @@ from f1strategy.finetune.dataset import (
 from f1strategy.finetune.losses import ft_loss, warmup_cosine
 from f1strategy.finetune.model import MODES, POOLS, TASKS, FtModel, HeadConfig, load_backbone
 from f1strategy.finetune.scrub import LEVELS, scrub_columns
+from f1strategy.finetune.weights import cmp_class_weight, pit_pos_weight
 from f1strategy.seqbert.config import SCALES
 from f1strategy.seqbert.masking import SeqMasker
 
@@ -104,9 +105,9 @@ def decode_for_metrics(p: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     return {"pit": p["pit"], "laps": p["laps"], "cmp": p["cmp"], "nomore": p["nomore"]}
 
 
-def select_score(rep: dict, tasks, horizons) -> float:
+def select_score(rep: dict, tasks, horizons, select: str = "auc") -> float:
     if "pit" in tasks:
-        return rep[f"pit{horizons[0]}"]["auc"]
+        return rep[f"pit{horizons[0]}"][select]
     if "laps" in tasks:
         return -rep["laps"]["mae"]
     if "cmp" in tasks:
@@ -127,6 +128,13 @@ def build_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--tasks", default=",".join(TASKS), help="comma list of: pit, laps, cmp, nomore")
     ap.add_argument("--horizons", default="5", help="laps for 'pits within the next H laps' (comma list)")
     ap.add_argument("--loss-weights", default="", help="e.g. pit=1,laps=1,cmp=1,nomore=0.5")
+    ap.add_argument(
+        "--pit-pos-weight",
+        default="1",
+        help="positive-class weight of the pit logits: 1 (none) | sqrt | auto | a number",
+    )
+    ap.add_argument("--cmp-weights", default="none", help="class weights of the compound loss: none | sqrt | balanced")
+    ap.add_argument("--select", default="auc", choices=["auc", "ap", "f1_best"], help="pit metric that selects best.pt")
     ap.add_argument(
         "--head",
         default="linear",
@@ -201,6 +209,13 @@ def main(argv=None) -> dict:
     tr_ix = finetune_index(tr_races, scale, hop_s)
     va_ix = finetune_index(va_races, scale, hop_s)
     tr_ds, va_ds = FtDataset(tr_ix, tr_lab), FtDataset(va_ix, va_lab)
+    tr_t = window_targets(tr_ix, tr_lab)
+    pw_list = pit_pos_weight(tr_t, horizons, a.pit_pos_weight)
+    cw_list = cmp_class_weight(tr_t, a.cmp_weights)
+    pos_w = torch.tensor(pw_list, device=device)
+    cmp_w = None if cw_list is None else torch.tensor(cw_list, device=device)
+    print(f"loss weights: pit positive-class weight {[round(x, 2) for x in pw_list]}, "
+          f"compound class weights {None if cw_list is None else [round(x, 2) for x in cw_list]}")  # fmt: skip
     bs = a.batch_size or BATCH[a.scale]
     print(f"{a.mode}: {len(tr_races)} train races / {len(tr_ds)} windows, {len(va_races)} val races / {len(va_ds)} windows, "
           f"scrub={a.scrub} ({len(cols)} columns), device={device}")  # fmt: skip
@@ -213,7 +228,8 @@ def main(argv=None) -> dict:
     (out / "args.json").write_text(json.dumps({"args": vars(a), "head": hc.as_dict(), "backbone": backbone.cfg.as_dict(),
                                                "scale": scale.name if hasattr(scale, "name") else a.scale,
                                                "n_tokens": scale.n_tokens, "driver_names": names, "scrub_cols": cols,
-                                               "params_trainable": n_train, "params_total": n_all}, indent=1, default=str))  # fmt: skip
+                                               "params_trainable": n_train, "params_total": n_all,
+                                               "pit_pos_weight": pw_list, "cmp_class_weights": cw_list}, indent=1, default=str))  # fmt: skip
     print(f"parameters: {n_train:,} trainable of {n_all:,}")
 
     sid = scale.scale_id
@@ -232,7 +248,7 @@ def main(argv=None) -> dict:
         # the embedding never changes: compute it once, then the head trains in seconds
         tr_feat = extract_features(model, mk(tr_ds, False), masker, device, sid, cols, a.scrub_fill, a.amp)
         va_feat = extract_features(model, mk(va_ds, False), masker, device, sid, cols, a.scrub_fill, a.amp)
-        tr_y = targets_to_torch(window_targets(tr_ix, tr_lab))
+        tr_y = targets_to_torch(tr_t)
         print(f"features: {tuple(tr_feat.shape)} train, {tuple(va_feat.shape)} val in {time.time() - t0:.0f}s")
         loader = DataLoader(FeatDataset(tr_feat, tr_y), 256, shuffle=True, drop_last=True)
     else:
@@ -248,13 +264,13 @@ def main(argv=None) -> dict:
                 g["lr"] = 0.0 if hold else g["base_lr"] * f
             if a.mode == "frozen":
                 feat, y = b[0].to(device), {k: v.to(device) for k, v in b[1].items()}
-                loss, parts = ft_loss(model.head_forward(feat), y, hc, weights)
+                loss, parts = ft_loss(model.head_forward(feat), y, hc, weights, pos_w, cmp_w)
             else:
                 mb = to_masked_batch(b["x"], masker, device, cols, a.scrub_fill)
                 y = {k: v.to(device) for k, v in b["y"].items()}
                 with torch.autocast(device.type, dtype=torch.bfloat16, enabled=a.amp):
                     out_ = model(mb, sid)
-                loss, parts = ft_loss(out_, y, hc, weights)
+                loss, parts = ft_loss(out_, y, hc, weights, pos_w, cmp_w)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             gn = torch.nn.utils.clip_grad_norm_([p for g in opt.param_groups for p in g["params"]], a.grad_clip)
@@ -272,12 +288,18 @@ def main(argv=None) -> dict:
                     else extract_features(model, mk(va_ds, False), masker, device, sid, cols, a.scrub_fill, a.amp)
                 )
                 rep = evaluate(predict_head(model, feats, device))
-                score = select_score(rep, tasks, horizons)
+                score = select_score(rep, tasks, horizons, a.select)
                 rec |= {"val_score": score, "is_best": score > best} | M.flatten_report(rep)
                 if score > best:
                     best = score
                     save(step, score)
-                print(f"step {step:5d} loss {float(loss):.4f} val {score:.4f}{' *' if rec['is_best'] else ''}  "
+                pr = rep[f"pit{horizons[0]}"] if "pit" in tasks else None
+                extra = (
+                    f"  pit@0.5 P {pr['precision']:.2f} R {pr['recall']:.2f} F1 {pr['f1']:.3f} AP {pr['ap']:.3f}"
+                    if pr
+                    else ""
+                )
+                print(f"step {step:5d} loss {float(loss):.4f} val {score:.4f}{' *' if rec['is_best'] else ''}{extra}  "
                       + "  ".join(f"{k} {v:.3f}" for k, v in M.flatten_report(rep).items() if k.endswith(("auc", "mae", "acc"))))  # fmt: skip
             log.write(json.dumps(rec) + "\n")
             log.flush()

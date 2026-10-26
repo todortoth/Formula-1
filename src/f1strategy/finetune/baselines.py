@@ -150,9 +150,9 @@ class Gbdt:
         )
 
 
-def run_baselines(train_t: dict, test_t: dict, horizons=(5,), names=("prior", "rule", "gbdt")) -> dict[str, dict]:
-    """Fit on the training targets, predict the test targets -> ``{name: prediction dict}`` (shape of ``metrics.summarize``)."""
-    out = {}
+def fit_baselines(train_t: dict, horizons=(5,), names=("prior", "rule", "gbdt")) -> dict:
+    """Fit the named baselines once on the training targets -> ``{name: fitted model}`` (``gbdt`` is skipped without scikit-learn)."""
+    models = {}
     for n in names:
         if n == "gbdt":
             try:
@@ -163,5 +163,15 @@ def run_baselines(train_t: dict, test_t: dict, horizons=(5,), names=("prior", "r
             mdl = Gbdt()
         else:
             mdl = {"prior": Prior, "rule": Rule}[n]()
-        out[n] = mdl.fit(train_t, horizons).predict(test_t, horizons)
-    return out
+        models[n] = mdl.fit(train_t, horizons)
+    return models
+
+
+def predict_baselines(models: dict, t: dict, horizons=(5,)) -> dict[str, dict]:
+    """Predictions of fitted baselines on one sample set (e.g. the validation season for the thresholds, then the test season)."""
+    return {n: m.predict(t, horizons) for n, m in models.items()}
+
+
+def run_baselines(train_t: dict, test_t: dict, horizons=(5,), names=("prior", "rule", "gbdt")) -> dict[str, dict]:
+    """Fit on the training targets, predict the test targets -> ``{name: prediction dict}`` (shape of ``metrics.summarize``)."""
+    return predict_baselines(fit_baselines(train_t, horizons, names), test_t, horizons)

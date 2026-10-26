@@ -2,10 +2,10 @@ name: Live data tests
 
 # Runs the tests marked `live` against the real FastF1 / F1 live-timing API. Kept out of ci.yml because it needs
 # network access, downloads a lot of data and depends on the availability of F1's servers.
-on:
-  schedule:
+#on:
+#  schedule:
     # - cron: "0 6 * * 1"   # Mondays, 06:00 UTC
-  workflow_dispatch:
+#  workflow_dispatch:
 
 permissions:
   contents: read

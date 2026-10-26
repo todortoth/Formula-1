@@ -1,0 +1,34 @@
+Flowchart LR
+    API[("F1 live timing<br/>FastF1 API")] --> S1
+    subgraph S1 ["Versenyek feldolgozása"]
+        SA["SessionAnalyser<br/>pálya, versenyirányítás<br/>telemetria, időmérés"] --> SB["SequenceBuilder<br/>10 Hz adatok"]
+    end
+    S1 --> PQ[("parquet_datasets/<br/>YEAR_round_NN.ds<br/>versenyenkénti adathalmaz")]
+    PQ --> C["cache.py<br/> normalizálás,<br/>128 pályapont"]
+    C --> NPY[("cache/YEAR_round_NN")]
+    NPY --> Q["seqbert.train<br/>T hosszú gráfok,<br/>gráf->vektor, időbeli figyelem"]
+    Q --> QK[("finetune.train<br/>felügyelt finomhangolás (boxkiállás predikció)")]
+    SC["scrape.sh<br/>minden verseny (2019-2025)"] -.-> S1
+
+
+flowchart TD
+    subgraph Pálya Gyűrű (~10m node-ok)
+        T1["T0000 (Célegyenes)"] -->|track_next: length_m| T2["T0001"]
+        T2 -->|track_next: length_m| T3["T0002"]
+    end
+    
+    subgraph Pilóta Slotok
+        VER["VER (Max Verstappen)"]
+        HAM["HAM (Lewis Hamilton)"]
+    end
+    
+    VER -.->|on_node / occupied_by<br/>offset_m, lateral_m| T1
+    HAM -.->|on_node / occupied_by<br/>offset_m, lateral_m| T3
+    
+    VER ===|proximity edge<br/>gap_s, progress_gap_m, circular_gap_m,<br/>lap_diff, rel_speed_kmh, drs_window| HAM
+
+    style T1 fill:#f9f,stroke:#333,stroke-width:2px
+    style T2 fill:#f9f,stroke:#333,stroke-width:2px
+    style T3 fill:#f9f,stroke:#333,stroke-width:2px
+    style VER fill:#bbf,stroke:#333,stroke-width:2px
+    style HAM fill:#bbf,stroke:#333,stroke-width:2px
