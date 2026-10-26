@@ -75,6 +75,7 @@ def test_rule_baseline_recovers_a_rule_world_and_beats_the_prior():
     assert rule["cmp"]["acc"] > 0.9
     assert pred["rule"]["pit"].shape == (400, 22, 1)
 
+
 """
 def test_gbdt_baseline_runs_if_sklearn_is_present():
     pytest.importorskip("sklearn")
@@ -83,6 +84,7 @@ def test_gbdt_baseline_runs_if_sklearn_is_present():
     rep = M.summarize(pred["gbdt"], te, (5,))
     assert rep["pit5"]["auc"] > 0.9 and rep["laps"]["mae"] < 3
 """
+
 
 def test_tie_aware_f1_and_validation_thresholds():
     rng = np.random.default_rng(0)
