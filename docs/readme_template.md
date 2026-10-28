@@ -70,6 +70,7 @@ representation-learning foundation for that.
   - [Results so far and status](#results-so-far-and-status)
 - **Stage 5 - supervised fine-tuning**
   - [Supervised fine-tuning](#supervised-fine-tuning)
+  - [Final results (2026 test season)](#final-results-2026-test-season)
   - [The tasks and how the labels are cut](#the-tasks-and-how-the-labels-are-cut)
   - [Leak control of the input](#leak-control-of-the-input-finetunescrubpy)
   - [Freeze modes](#freeze-modes-how-much-of-the-pre-trained-model-may-change)
@@ -77,6 +78,7 @@ representation-learning foundation for that.
   - [Seasons](#seasons)
   - [Running it](#running-it)
   - [Class balance, metrics and thresholds](#class-balance-metrics-and-thresholds)
+  - [Development record](#development-record-validation-experiments-controls-and-intermediate-runs)
   - [Experiments and results](#experiments-and-results-validation-2025)
   - [Choosing the class weight](#choosing-the-class-weight-validation-2025-threshold-05)
   - [Longer training and head variants](#longer-training-and-head-variants-validation-2025-seed-0)
@@ -1240,6 +1242,159 @@ flowchart LR
     BL --> EV
 ```
 
+### Final results (2026 test season)
+
+> **This section holds the results to quote.** Everything under "Development record" further down is the working record (validation experiments, controls, intermediate test runs); where a later number supersedes an earlier one it is marked there.
+> All numbers: the 16 races of the 2026 season that neither the pre-training nor any tuning has seen; every model is trained on 2019-2024 and its configuration was fixed on the 2025 season; decision thresholds are fitted on 2025;
+> the baselines are fitted on 2019-2024. `gbdt` (gradient boosting on the same car state) is only a reference and never part of a model.
+
+**The final systems** (all: frozen pre-trained backbone `runs/mixed_gnn/best.pt`, shared per-car head, weight `sqrt` on the pit logits, 3000 steps; the member runs differ in the seed only)
+
+| system | windows | head | members |
+|---|---|---|---|
+| **A** | 1 lap | no embedding (`--ctx-dim 0 --no-slot-branch`) | 3 seeds, mean prediction |
+| **B** | 10 laps | no embedding, horizons 5,1,3,10 | 3 seeds, mean prediction |
+| **E** | 10 laps | the embedding as 16-dimensional context (`--ctx-dim 16 --no-slot-branch --head-dropout 0.3 --weight-decay 0.05`), horizons 5,1,3,10 | 3 seeds, mean prediction |
+| **BE** | 10 laps | B and E together | the six runs, mean prediction |
+| **AE** | 1 lap | A and three E-type 1-lap runs | six runs; validation only, not yet run on 2026 |
+
+**Table 1: 10-lap windows** (1,297 windows, 23,406 (window, car) pairs; positives: 13.4 % pit within 5 laps, 58.5 % no further stop)
+
+| | B | E | **BE** | `gbdt` | `rule` | `prior` |
+|---|---|---|---|---|---|---|
+| pit within 5 laps: AUC | 0.791 | 0.786 | **0.800** | 0.782 | 0.674 | 0.500 |
+| pit5: average precision | 0.414 | 0.402 | **0.455** | 0.375 | 0.202 | 0.134 |
+| pit5: F1 (everything-is-a-stop: 0.236) | 0.419 | 0.446 | **0.452** | 0.410 | 0.298 | 0.236 |
+| pit5: precision / recall at that threshold | 0.450 / 0.392 | 0.406 / 0.495 | 0.457 / 0.447 | 0.308 / 0.612 | 0.213 / 0.496 | 0.134 / 1.00 |
+| pit5: best-threshold F1 | 0.449 | 0.448 | **0.462** | 0.419 | 0.318 | 0.236 |
+| no further stop: AUC | 0.859 | 0.852 | **0.861** | 0.854 | 0.824 | 0.500 |
+| no further stop: F1 (always yes: 0.738) | **0.833** | 0.802 | 0.821 | 0.809 | 0.774 | 0.738 |
+| next compound: accuracy (most frequent class: 0.387) | 0.561 | 0.589 | **0.611** | 0.582 | 0.524 | 0.387 |
+| next compound: macro-F1 | 0.572 | 0.593 | **0.618** | 0.572 | 0.427 | 0.186 |
+| laps to the next stop: mean error (laps) | **5.16** | 5.56 | 5.19 | 5.18 | 6.21 | 6.02 |
+| laps to the next stop: share within +-2 laps | 0.311 | 0.277 | 0.297 | **0.323** | 0.251 | 0.226 |
+
+**Table 2: 1-lap windows** (3,024 windows, 54,681 pairs; positives: 12.4 % pit within 5 laps, 51.5 % no further stop)
+
+| | A | `gbdt` | `rule` | `prior` |
+|---|---|---|---|---|
+| pit within 5 laps: AUC | 0.767 | **0.775** | 0.687 | 0.500 |
+| pit5: average precision | **0.368** | 0.328 | 0.197 | 0.124 |
+| pit5: F1 (everything-is-a-stop: 0.221) | **0.397** | 0.393 | 0.286 | 0.221 |
+| pit5: precision / recall at that threshold | 0.367 / 0.432 | 0.307 / 0.545 | 0.211 / 0.443 | 0.124 / 1.00 |
+| no further stop: AUC | **0.887** | 0.882 | 0.842 | 0.500 |
+| no further stop: F1 (always yes: 0.680) | **0.822** | 0.797 | 0.771 | 0.680 |
+| next compound: accuracy (most frequent class: 0.450) | **0.598** | 0.585 | 0.582 | 0.450 |
+| laps to the next stop: mean error (laps) | 5.95 | **5.83** | 6.45 | 6.73 |
+| laps to the next stop: share within +-2 laps | 0.286 | **0.298** | 0.233 | 0.213 |
+
+#### Finding 1: the pre-trained embedding carries information that the car's own state does not
+
+Models that get the embedding as context make different errors from the tabular models, so their mean beats the tabular-only ensemble. Same-size controls on the validation season (24 races of 2025):
+
+| validation 2025 | tabular only, 6 runs | tabular + embedding, 3 + 3 runs |
+|---|---|---|
+| 10-lap windows: pit5 AUC / AP / best-threshold F1 | 0.801 / 0.460 / 0.484 | **0.813 / 0.483 / 0.500** |
+| 10-lap windows: laps error / compound accuracy / no-more AUC | 5.54 / 0.555 / 0.908 | **5.50 / 0.584 / 0.918** |
+| 1-lap windows: pit5 AUC / AP / best-threshold F1 | 0.784 / 0.426 / 0.460 | **0.799 / 0.454 / 0.488** |
+| 1-lap windows: laps error / compound accuracy / no-more AUC | 6.18 / 0.579 / 0.925 | **5.93 / 0.589 / 0.934** |
+
+Race by race on the 2026 test season (10-lap windows; mean difference over the 16 races, 95 % bootstrap interval in brackets, "real" = the interval excludes 0):
+
+| | E - B | BE - B | BE - (B + `gbdt`) |
+|---|---|---|---|
+| pit5 average precision | +0.039 [-0.005, +0.082] | **+0.045 [+0.020, +0.074]** | **+0.019 [+0.003, +0.037]** |
+| pit5 AUC | +0.020 [-0.000, +0.041] | **+0.022 [+0.009, +0.035]** | +0.010 [-0.001, +0.023] |
+| pit5 best-threshold F1 | **+0.042 [+0.004, +0.081]** | **+0.042 [+0.013, +0.075]** | +0.007 [-0.014, +0.028] |
+| pit within 1 / 3 / 10 laps: average precision | +0.023 / +0.036 / +0.031 | **+0.029 / +0.040 / +0.046** (all real) | +0.009 / +0.016 / +0.010 |
+| next compound: accuracy | +0.078 [-0.024, +0.192] | **+0.083 [+0.018, +0.160]** | (compound of B only: not a comparison) |
+
+* The effect is **moderate but consistent**: on the validation season it appears on both window lengths and on every task; on the test season the mixture is better than the tabular ensemble on every pit horizon, in the AUC and in the compound.
+* It is **not specific to long windows**: the validation gain of the 1-lap mixture is as large as that of the 10-lap one (AP +0.028 and +0.023). The test-season run of the 1-lap mixture (AE) has not been made.
+* The embedding **alone** is directionally better than the tabular head (E - B), but only the best-threshold F1 is real; the gain is mainly a gain of the *combination*.
+* **Part of the gain is model diversity**: in the last column a plain `gbdt` partner replaces the embedding models, and the embedding's own extra over it is +0.019 average precision (the other pit metrics not real). The ensemble gain over the tabular models is therefore roughly half diversity, half embedding.
+* Whether the information in the embedding comes from the time axis of the window or from the field and track context seen by the graph encoder was not isolated.
+
+#### Finding 2: the pipeline is useful, not perfect
+
+* **No further stop** is predicted well: AUC 0.85-0.89 and F1 0.80-0.83 against 0.68-0.74 for "always yes".
+* **The next compound** is right in 56-61 % of the stops (most frequent class: 39-45 %); the embedding models are better at it (E, BE: 0.59-0.61 against 0.56 for B on 10 laps), mainly by finding soft-tyre stops (recall of SOFT 0.60 for an E run, 0.41 for a B run; `scripts/confusion_matrix.py`).
+* **A stop within the next 5 laps** is found with a precision and a recall of about 0.45 on 10-lap windows (0.37 / 0.43 on 1 lap): roughly every second alarm is real and every second stop is caught, against a precision of 0.13 for guessing.
+* **The laps to the next stop are the weak point**: a mean error of 5-6 laps and only about 30 % of the estimates within +-2 laps.
+* **With a longer prediction horizon the hits become more reliable in absolute terms**, because stops become more frequent; the ability to separate the cars does not change:
+
+| BE, 10-lap windows, 2026 | pit within 1 lap | within 3 laps | within 5 laps | within 10 laps |
+|---|---|---|---|---|
+| positive share | 3.1 % | 8.5 % | 13.4 % | 23.8 % |
+| AUC | 0.818 | 0.797 | 0.800 | 0.818 |
+| average precision (factor over the positive share) | 0.282 (9.1x) | 0.361 (4.2x) | 0.455 (3.4x) | 0.636 (2.7x) |
+| F1 (everything-is-a-stop) | 0.276 (0.060) | 0.368 (0.156) | 0.452 (0.236) | 0.593 (0.384) |
+| precision / recall | 0.218 / 0.376 | 0.373 / 0.364 | 0.457 / 0.447 | 0.569 / 0.620 |
+
+  Within 10 laps about 57 % of the alarms are real and about 62 % of the stops are caught; the AUC is the same at every horizon, and the factor over chance is largest for the shortest horizon.
+
+#### Finding 3: the final systems clearly beat the trivial and the rule-based baselines and are level with a tuned gradient-boosting model
+
+Race by race on the 2026 season (BE, 10-lap windows; mean over the 16 races, 95 % interval):
+
+| BE minus | `rule` | `prior` |
+|---|---|---|
+| pit5 average precision | **+0.243 [+0.152, +0.331]**, 13/16 | **+0.351 [+0.266, +0.436]**, 16/16 |
+| pit5 AUC / best-threshold F1 | **+0.109 / +0.140** | **+0.323 / +0.277** |
+| pit within 1 / 3 / 10 laps: average precision | **+0.222 / +0.222 / +0.291** | **+0.259 / +0.306 / +0.406** |
+| laps to the next stop: error (laps) | **-0.96 [-1.84, -0.03]** | **-1.01 [-1.50, -0.48]** |
+| next compound: accuracy | **+0.137 [+0.007, +0.277]** | **+0.263 [+0.092, +0.441]** |
+| no further stop: AUC / F1 | +0.011 / +0.042 (not real) | **+0.400 / +0.103** |
+
+Against `gbdt` the single systems (A, B) are equal within the noise of 16 races, with small leads in some metrics and small losses in others (Tables 1 and 2). The mixture BE is ahead of it in the pit5 average precision
+race by race (**+0.051 [+0.017, +0.092], 11/16 races**), the one difference to `gbdt` that is real. In the high-precision corner the 1-lap system A catches 27 % of the stops at a precision of at least 0.5, `gbdt` 8 % (matched samples, validation-fitted ranking). `gbdt` is better in the laps error.
+
+#### Finding 4: a longer window helps, but much less than the raw numbers suggest
+
+The 10-lap and 1-lap numbers are scored on different samples: a 10-lap window ends only after about lap 10, so its samples come from the later, more stable part of the race. Scoring the 1-lap system A only where 10-lap windows exist
+(46,507 pairs, `evaluate --match-from`) gives the like-for-like comparison:
+
+| 2026 test | A, 1 lap, matched | `gbdt` 1 lap, matched | B, 10 laps | `gbdt` 10 laps | B - A | `gbdt` change | head minus `gbdt` change |
+|---|---|---|---|---|---|---|---|
+| pit5 AUC | 0.784 | 0.788 | 0.791 | 0.782 | +0.007 | -0.006 | **+0.013** |
+| pit5 average precision | 0.395 | 0.356 | 0.414 | 0.375 | +0.019 | +0.019 | 0 |
+| pit5 best-threshold F1 | 0.422 | 0.418 | 0.449 | 0.419 | +0.027 | +0.001 | **+0.026** |
+| laps: mean error | 5.27 | 5.08 | 5.16 | 5.18 | -0.11 | +0.10 | **-0.21** |
+| compound accuracy | 0.562 | 0.567 | 0.561 | 0.582 | -0.001 | +0.015 | -0.016 |
+| no further stop: AUC | 0.860 | 0.858 | 0.859 | 0.854 | -0.001 | -0.004 | +0.003 |
+
+Over all samples the 10-lap system seems far better (AUC +0.024, average precision +0.046, laps error -0.78); on the same part of the race the gain shrinks to AUC +0.007, AP +0.019, best-threshold F1 +0.027 and laps error -0.11, and `gbdt`, which sees only the last frame of the window, gains as much in the AP.
+What remains for the longer window is a small gain in ranking (AUC +0.013, best-threshold F1 +0.026 and laps error -0.21 relative to the change of `gbdt`), none in the compound and the no-more-stop tasks. The comparison is one seed set per scale and has no race-by-race interval.
+
+#### Where the pipeline is weak
+
+* **Laps to the next stop**: 5-6 laps of error; `gbdt` is as good or better. **Soft-tyre stops** are found in 30-42 % of the cases by the tabular heads (precision 0.78-0.81), the soft/medium confusion is the main compound error; the 19 intermediate stops of 2026 (1-lap windows) were not found by the run inspected.
+  `scripts/confusion_matrix.py report.json --methods ens_BE,gbdt --png compound_cm.png` draws the compound confusion matrices from any `evaluate` report.
+* **Different seasons differ**: the share of cars without a further stop rose from 41-48 % (2025) to 52-59 % (2026) and soft tyres from 20-23 % to 30-36 % of the stops; the no-further-stop AUC fell by about 0.10 for the rule of thumb and by about 0.04 for the learned heads and for `gbdt`.
+
+#### How to reproduce the final numbers
+
+```bash
+# 1) the member runs (frozen backbone; seeds 0-2)
+C="--cache cache --init runs/mixed_gnn/best.pt --mode frozen --head car --pit-pos-weight sqrt --steps 3000 --amp"
+for s in 0 1 2; do
+  python -m f1strategy.finetune.train $C --scale medium --seed $s --ctx-dim 0 --no-slot-branch --eval-every 100 --out runs/final_tab_wsqrt_s$s                                  # A
+  python -m f1strategy.finetune.train $C --scale long --seed $s --ctx-dim 0 --no-slot-branch --horizons 5,1,3,10 --eval-every 100 --out runs/long_B_s$s                      # B
+  python -m f1strategy.finetune.train $C --scale long --seed $s --ctx-dim 16 --no-slot-branch --head-dropout 0.3 --weight-decay 0.05 --horizons 5,1,3,10 --eval-every 50 --out runs/long_E_s$s   # E
+  python -m f1strategy.finetune.train $C --scale medium --seed $s --ctx-dim 16 --no-slot-branch --head-dropout 0.3 --weight-decay 0.05 --eval-every 50 --out runs/med_E_s$s            # 1-lap E (for AE)
+done
+# 2) the test season: tables, thresholds fitted on 2025, race-by-race comparisons (1 lap: add --match-from runs/long_B_s0/best.pt for the matched samples)
+OMP_NUM_THREADS=4 python -m f1strategy.finetune.evaluate --cache cache --years 2026 --val-years 2025 --train-years 2019-2024 \
+  --run runs/long_B_s0/best.pt,runs/long_B_s1/best.pt,runs/long_B_s2/best.pt,runs/long_E_s0/best.pt,runs/long_E_s1/best.pt,runs/long_E_s2/best.pt \
+  --groups "B=0,1,2;E=3,4,5;BE=0,1,2,3,4,5;Bgbdt=0,1,2,gbdt,gbdt,gbdt" --report runs/eval/test2026_groups_long.json
+python scripts/compare_by_race.py runs/eval/test2026_groups_long.json ens_BE ens_B        # also: ens_E ens_B, ens_BE ens_Bgbdt, ens_BE gbdt, ens_BE rule, ens_BE prior
+python scripts/confusion_matrix.py runs/eval/test2026_groups_long.json --methods ens_B,ens_E,ens_BE,gbdt --png compound_cm.png
+```
+
+**Caveats of the final results.** Sixteen races are few: no single configuration (A, B) differs from `gbdt` beyond the race-to-race noise, and of about a dozen metrics per comparison only the pre-fixed primary one (pit5 average precision) is read as a result.
+The 2026 season was looked at several times (the first tests with other configurations, the controls); the hypotheses behind the final systems come from the validation season and the controls were run on it first. The pooled average precision also ranks cars across races and
+overstates the models compared with the per-race values. The 10-lap system A-to-B comparison of Finding 4 has no interval. Details, controls and the superseded intermediate runs: see the development record below.
+
 ### The tasks and how the labels are cut
 
 A sample is one window of T graphs (`medium` = 1 lap, 96 tokens; `long` = 10 laps, 192 tokens) and, for **every car slot**, the
@@ -1425,6 +1580,8 @@ The other configurations of the experiments (per-slot heads, `partial` / `full`)
 use `--lr-backbone 1e-5 --head-warmup-steps 300`). `--mode scratch` (random weights) and `--scrub none` / `strict` exist as controls but have not been run.
 Always pass the same `--train-years` to `evaluate` as to `train`: the baselines are fitted on those seasons.
 
+Further options of `evaluate`: several runs in one table (`--run a.pt,b.pt,...`), `--ensemble` (mean of all runs as one more row), `--groups "B=0,1,2;E=3,4,5;Bgbdt=0,1,2,gbdt,gbdt,gbdt"` (named mean predictions of subsets of the runs; a baseline name is allowed as a member; rows `ens_<name>`, compared race by race with `python scripts/compare_by_race.py report.json ens_E ens_B`), `--match-from other_scale/best.pt` (score only the windows that end where the other scale's windows can end), `--val-years` (season of the thresholds), `--report`.
+
 | Option (`finetune.train`) | Default | Meaning |
 |---|---|---|
 | `--init` | required | pre-trained `best.pt` (a mixed checkpoint works at `--scale medium` and `long`); also the architecture source for `scratch` |
@@ -1442,6 +1599,11 @@ Always pass the same `--train-years` to `evaluate` as to `train`: the baselines 
 
 `best.pt` of a run holds backbone + head weights and everything `evaluate.py` needs (head config, scale, scrub columns); the checkpoint with the best validation
 score (ROC-AUC of the first horizon, else laps MAE, else compound accuracy) is kept. `log.jsonl` has the losses and every validation metric.
+
+### Development record: validation experiments, controls and intermediate runs
+
+> The sections from here to "Status and limitations" are the working record in the order the work was done: validation experiments, the choice of the class weight and of the training length, the embedding controls and the first test runs on 2026.
+> They explain how the final systems were chosen and carry the details behind the [Final results](#final-results-2026-test-season). Where a later number supersedes an earlier one the section says so; the numbers to quote are the final results.
 
 ### Experiments and results (validation 2025)
 
@@ -1504,7 +1666,7 @@ laps MAE 5.723 / 5.687 / 5.531, compound 0.592 / 0.583 / 0.598.
 8. **Practical.** The pooled features of 24,000 windows take about 30 s, one head trains in about a minute (frozen mode); a full backbone fine-tuning takes 4-5 minutes for 2,000 steps. `best.pt` is chosen on the pit5 AUC only, so the other
    tasks are those of that step (read them from `log.jsonl`, or train one task per run with `--tasks`). `gbdt` uses every CPU core (`OMP_NUM_THREADS=4`).
 
-**Not run (yet):** the direct race-by-race comparison of the B, E and mixed groups and the control that mixes `gbdt` into the tabular models instead of the embedding models (both with `--groups`), the mixed A and E ensemble on 1-lap windows, `--cmp-weights`, a separate `--tasks cmp,nomore` model, `partial` / `full` with the `car` head, `--mode scratch`, the scrub ablations (`--scrub none` / `strict`), per-task checkpoints, an ensemble of the three seeds.
+**Not run (yet):** the 2026 test of the mixed 1-lap system AE, a seed set and a race-by-race interval for the matched 1-lap / 10-lap comparison, `Bgbdt` against `gbdt` alone, a weight search for the mixture of B, E and `gbdt`, the mixed A and E ensemble on 1-lap windows, `--cmp-weights`, a separate `--tasks cmp,nomore` model, `partial` / `full` with the `car` head, `--mode scratch`, the scrub ablations (`--scrub none` / `strict`), per-task checkpoints, an ensemble of the three seeds.
 The `partial` / `full` runs used the default seasons (2019-2024 / 2025) like all the others.
 
 ### Choosing the class weight (validation 2025, threshold 0.5)
@@ -1607,6 +1769,8 @@ of the head (`--ctx-dim 16 --no-slot-branch --head-dropout 0.3 --weight-decay 0.
 
 ### Test season 2026 (16 races)
 
+*Intermediate run: the first 10-lap models (600 steps, no extra horizons), three seeds, threshold 0.5. Superseded by the [final results](#final-results-2026-test-season).*
+
 Run once on all 16 races of 2026 that were available (1-lap windows: 3,024 windows, 54,681 pairs; 10-lap windows: 1,297 windows, 23,406 pairs), after the configuration was fixed on the validation season (`car` head, no embedding, frozen backbone, 3 seeds).
 Baselines are fitted on 2019-2024. The pre-training never saw 2026, and nothing here was tuned on it. The model rows are the mean of three seeds; F1, precision and recall are at the threshold 0.5 (see
 [Class balance, metrics and thresholds](#class-balance-metrics-and-thresholds)).
@@ -1649,6 +1813,8 @@ Spread over the three seeds: pit5 AUC 0.771-0.776 (1 lap), 0.781-0.786 (10 laps)
    embedding variant has not been run on 2026.
 
 ### Test season 2026 with validation-fitted thresholds, and class weights (seed 0)
+
+*Intermediate run: one seed, 600-step 10-lap models. Superseded by the [final results](#final-results-2026-test-season); the class-weight findings (point 2) still hold.*
 
 Same 16 races, evaluated by the new `evaluate` (several runs in one table): the threshold of every method is fitted on 2025 and applied unchanged to 2026. Model rows: the `car` head without embedding,
 seed 0, unweighted (`final_*_tab_s0`) and with `--pit-pos-weight auto` (`final_*_tab_wauto_s0`); baselines fitted on 2019-2024. Only the weight `auto` was tried, and the choice among weights on the validation season was skipped.
@@ -1711,6 +1877,8 @@ python scripts/compare_by_race.py runs/eval/test2026_seeds_medium.json final_tab
 
 ### Test season 2026: the final configurations
 
+*The A and B systems of the [final results](#final-results-2026-test-season) against `gbdt` race by race (the columns B and A of Tables 1 and 2 come from here).*
+
 Run once, after the configurations had been fixed on the validation season (see [Seeds and the configuration fixed](#longer-training-and-head-variants-validation-2025-seed-0)): **10-lap windows: variant B** (`car` head, no embedding, frozen backbone, horizons 5,1,3,10,
 weight `sqrt`, 3000 steps), **1-lap windows: variant A** (`final_tab_wsqrt`: same without the extra horizons). Three seeds each and their mean prediction (`ensemble`); thresholds fitted on 2025; baselines fitted on 2019-2024; 16 races
 (1-lap windows: 3,024 windows, 54,681 pairs; 10-lap windows: 1,297 windows, 23,406 pairs). The extra horizons are scored for B as well; `gbdt` is fitted for the same horizons.
@@ -1770,6 +1938,8 @@ weight `sqrt`, 3000 steps), **1-lap windows: variant A** (`final_tab_wsqrt`: sam
 
 ### Test season 2026: mixed ensemble (with and without the embedding)
 
+*Source of the BE column of the final results; the controls that qualify it follow below.*
+
 Run once on the 16 races of 2026 (10-lap windows: 1,297 windows, 23,406 pairs) after the control above had been run on the validation season: `ensemble` = mean of the three B and the three E runs, thresholds fitted on 2025, baselines fitted on 2019-2024.
 This is the third look at the 2026 season; the hypothesis (mixing models with and without the embedding) and its same-size control come from the validation season.
 
@@ -1806,7 +1976,7 @@ Race by race, `ensemble - gbdt` (`scripts/compare_by_race.py`, 16 races, 95 % bo
 4. **Compound:** the E members carry it (0.567-0.607 against 0.556-0.561 for B; mixed 0.611), not significant per race.
 5. **Caveats.** Eight metrics were compared and one is significant (the primary one; no correction for the number of comparisons); the F1 at the fitted threshold (+0.042 pooled) and the AUC are not significant per race; a six-member ensemble is compared with a single
    `gbdt`, and the control "mix `gbdt` or another diverse tabular model into the tabular ensemble" (is it any diversity, or the pre-trained embedding?) has not been run. The same comparison on 1-lap windows has not been run.
-6. **What it says about the pre-training:** the frozen embedding is not enough alone (it does not beat the tabular head), but as a second view of the race, fused late with tabular models, it adds a measurable gain in finding the stops that holds on an unseen season.
+6. **What it says about the pre-training:** the frozen embedding is not enough alone (it is not better than the tabular head in the pooled numbers), but fused late with tabular models it gives a gain over the tabular-only ensemble that holds on an unseen season. The controls below show that most of this gain is model diversity (a `gbdt` partner gives a large part of it) and that the embedding adds a small, real extra in the pit5 average precision (+0.019).
 
 **The embedding models alone, on 2026.** The ensemble of the three E runs (no tabular-only member) against `gbdt` on the same races:
 
@@ -1833,6 +2003,28 @@ Choosing subsets of the six runs after looking at the 2026 results is not allowe
 
 The single E runs have AUC 0.782 / 0.785 / 0.792 and AP 0.402 / 0.401 / 0.438. Six A runs are as good as three (the A models are nearly identical), E alone is not better than A in the AP. The mixed A and E ensemble on 1-lap windows has not been run.
 
+**The decisive controls, race by race (2026, 10-lap windows, `--groups`).** Groups of the six runs: `B` = three runs without the embedding, `E` = three with it, `BE` = all six, `Bgbdt` = the three B runs plus `gbdt` with the same weight as the E runs have in `BE` (3 + 3).
+Mean over the 16 races of the first group minus the second, 95 % bootstrap interval (a positive laps-MAE difference means the first group is worse).
+
+| | E - B | BE - B | BE - Bgbdt |
+|---|---|---|---|
+| pit5 AP | +0.039 [-0.005, +0.082], 13/16 | **+0.045 [+0.020, +0.074]**, 14/16 | **+0.019 [+0.003, +0.037]**, 12/16 |
+| pit5 AUC | +0.020 [-0.000, +0.041] | **+0.022 [+0.009, +0.035]** | +0.010 [-0.001, +0.023] |
+| pit5 F1 at the 2025 threshold | +0.014 [-0.033, +0.059] | **+0.031 [+0.002, +0.061]** | -0.011 [-0.063, +0.028] |
+| pit5 F1best | **+0.042 [+0.004, +0.081]** | **+0.042 [+0.013, +0.075]** | +0.007 [-0.014, +0.028] |
+| pit1 / pit3 / pit10 AP | +0.023 / +0.036 / +0.031, none real | **+0.029 / +0.040 / +0.046**, all real | +0.009 / +0.016 / +0.010, none real |
+| laps MAE | +0.260 [-0.157, +0.689] | -0.082 [-0.335, +0.162] | **+0.352 [+0.008, +0.740]** (worse) |
+| compound accuracy | +0.078 [-0.024, +0.192] | **+0.083 [+0.018, +0.160]** | **+0.083 [+0.018, +0.160]** (*) |
+| no-more AUC / F1 | +0.004 / -0.026, none real | **+0.007 [+0.003, +0.012]** / -0.008 | -0.001 / +0.014, none real |
+
+(*) `gbdt` gives no compound probabilities, so the compound of `Bgbdt` is that of the three B runs: this row compares E's compound information with B's, not with `gbdt`.
+
+1. **Mixing models with and without the embedding beats the tabular-only ensemble on every horizon and on the compound** (pit5 AP +0.045, AUC +0.022, best-threshold F1 +0.042; race-by-race intervals above 0).
+2. **Most of that gain is model diversity, not the embedding.** A plain tabular partner (`gbdt`) in place of the embedding models recovers about 0.026 of the 0.045 AP. What the embedding adds beyond it is **+0.019 pit5 AP** (interval 0.003-0.037, 12/16 races),
+   +0.010 AUC and +0.007 best-threshold F1 (neither real), and nothing real on the other horizons. The laps MAE of the mixture is worse than with `gbdt` as the partner (`gbdt` is the best laps model).
+3. **The embedding alone is directionally better than the tabular models** (E - B: AP +0.039, AUC +0.020, best-threshold F1 +0.042, the last one real), but not more than that.
+4. **Caveats.** Each comparison has about 14 metrics and about three intervals exclude 0 at the +0.019 level, so only the pre-fixed primary metric (pit5 AP) is read as a result; one set of seeds; the 50 % weight of the partner is arbitrary; `Bgbdt` against `gbdt` alone is not in this table.
+
 ### Status and limitations
 
 * **Implemented, tested and run on the corpus.** `tests/finetune` (23 tests: the label logic with the 12 / 5 example, penalties, pit lane and retirements; metrics; scrub levels; the baselines;
@@ -1840,7 +2032,7 @@ The single E runs have AUC 0.782 / 0.785 / 0.792 and AP 0.402 / 0.401 / 0.438. S
 * **Checked assumptions about code outside this stage.** The scrub overwrites columns of `raw["drv"]` with a constant before `SeqMasker.plain` (`--scrub-fill zero`, used in all runs; `nan` is untested);
   the slot indices of the labels (the Parquet `slot` column) are the slots of the cache.
 * **What the model really is.** The best configuration reads the car's own end-of-window state (and its change over the window) with a head shared by all slots; the pre-trained backbone is frozen
-  and its embedding is not used. It matches gradient boosting rather than beating it. The pre-training contributes as a second view: models that get the embedding as context make different errors, and the mean of models with and without it beats gradient boosting on the 10-lap windows (pit5 AP +0.05 race by race on 2026, see [the mixed ensemble](#test-season-2026-mixed-ensemble-with-and-without-the-embedding)).
+  and its embedding is not used. It matches gradient boosting rather than beating it. The pre-training contributes as a second view: models that get the embedding as context make different errors, and the mean of models with and without it beats gradient boosting on the 10-lap windows (pit5 AP +0.05 race by race on 2026, see [the mixed ensemble](#test-season-2026-mixed-ensemble-with-and-without-the-embedding)); a `gbdt` partner in place of the embedding models recovers about half of that gain, the embedding's own extra is +0.019 AP.
 * **Per-slot heads.** Slots are alphabetical per race, so slot *k* is a different driver in every race; reading slot *k* from a pooled vector was the weak point of the `linear` / `mlp` heads.
 * **Sample counts are correlated.** One window labels up to 22 cars and neighbouring windows overlap (30 s apart on one lap, 60 s on ten laps); the effective sample size is much smaller than the number of
   (window, car) pairs. Compare methods on the same races and read the per-race table of `evaluate.py`.

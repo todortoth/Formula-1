@@ -65,6 +65,24 @@ def best_f1_threshold(y: np.ndarray, s: np.ndarray) -> tuple[float, float]:
     return float(thr[i]), float(f1[i])
 
 
+def operating_points(y: np.ndarray, s: np.ndarray) -> dict[str, float]:
+    """What the scores can deliver at a given need: the best precision at recall >= 30 / 50 / 70 % and the best recall at precision >= 40 / 50 %
+    (best over all thresholds on this set; 0.0 if the need cannot be met)."""
+    y = np.asarray(y).astype(bool)
+    out = {f"p_at_r{r}": 0.0 for r in (30, 50, 70)} | {f"r_at_p{q}": 0.0 for q in (40, 50)}
+    if not y.any():
+        return out
+    _, tp, fp = _curve(y, s)
+    prec, rec = tp / (tp + fp), tp / y.sum()
+    for r in (30, 50, 70):
+        ok = rec >= r / 100
+        out[f"p_at_r{r}"] = float(prec[ok].max()) if ok.any() else 0.0
+    for q in (40, 50):
+        ok = prec >= q / 100
+        out[f"r_at_p{q}"] = float(rec[ok].max()) if ok.any() else 0.0
+    return out
+
+
 def binary_metrics(y: np.ndarray, p: np.ndarray, threshold: float = 0.5) -> dict[str, float]:
     """``p`` is a probability-like score; ``f1`` / ``precision`` / ``recall`` / ``mcc`` are at ``threshold``."""
     y = np.asarray(y).astype(bool)
@@ -84,6 +102,7 @@ def binary_metrics(y: np.ndarray, p: np.ndarray, threshold: float = 0.5) -> dict
         "specificity": float(spec), "balanced_acc": float((rec + spec) / 2), "mcc": float((tp * tn - fp * fn) / den) if den > 0 else 0.0,
         "acc": float((pred == y).mean()) if len(y) else float("nan"),
         "f1_best": f1_best, "thr_best": thr_best,
+        **operating_points(y, p),
         "f1_05": float(2 * tp5 / max(2 * tp5 + fp5 + fn5, 1)), "precision_05": float(tp5 / max(tp5 + fp5, 1)),
         "recall_05": float(tp5 / max(tp5 + fn5, 1)),
         "brier": float(np.mean((p - y) ** 2)) if len(y) else float("nan"),
@@ -202,6 +221,16 @@ def flatten_report(rep: dict) -> dict[str, float]:
     return f
 
 
+def mask_before(t: dict, first_end: dict[int, int]) -> dict:
+    """Copy of the sample set ``t`` (``dataset.window_targets``) in which the windows that end before ``first_end[race]`` (a frame index)
+    are not valid; a race missing from the dict is dropped.  Used to score a 1-lap model on the same part of the race as a 10-lap model."""
+    out = dict(t)
+    big = np.iinfo(np.int64).max
+    lim = np.array([first_end.get(int(r), big) for r in t["race"]], dtype=np.int64)
+    out["valid"] = t["valid"] & (np.asarray(t["frame"]) >= lim)[:, None]
+    return out
+
+
 # ------------------------------------------------------------------------------------------------ label distribution
 def label_stats(tgt: dict, horizons: tuple[int, ...] = (5,)) -> dict:
     """How many positives / negatives every task has in one sample set (same ``tgt`` as ``summarize``)."""
@@ -300,6 +329,10 @@ def report_text(reports: dict[str, dict], horizons: tuple[int, ...] = (5,), val_
         p = r0["base_rate"]
         out.append("\n" + _block(f"[pit within {h} laps]  positives {r0['positives']:,} of {r0['n']:,} ({100 * p:.1f} %), "
                                   f"F1 of 'everything is a stop' = {2 * p / (1 + p):.3f}", names, bin_cols,
+                                  lambda n, c, k=k: reports[n][k].get(c)))  # fmt: skip
+        out.append("\n" + _block(f"[pit within {h} laps: what the ranking can deliver]  best precision at recall >= 30 / 50 / 70 %, best recall at precision >= 40 / 50 %",
+                                  names, [("P@R30", "p_at_r30", 1), ("P@R50", "p_at_r50", 1), ("P@R70", "p_at_r70", 1),
+                                          ("R@P40", "r_at_p40", 1), ("R@P50", "r_at_p50", 1)],
                                   lambda n, c, k=k: reports[n][k].get(c)))  # fmt: skip
     if "laps" in first:
         out.append("\n" + _block(f"[laps to the next stop]  {first['laps']['n']:,} pairs with a next stop", names,

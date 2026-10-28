@@ -24,6 +24,7 @@ from f1strategy.finetune.baselines import fit_baselines, predict_baselines
 from f1strategy.finetune.dataset import (
     DEFAULT_HOP_S,
     FtDataset,
+    end_frame,
     finetune_index,
     open_labelled_races,
     parse_years,
@@ -33,6 +34,18 @@ from f1strategy.finetune.ensembling import ensemble, group_members, parse_groups
 from f1strategy.finetune.model import load_finetuned
 from f1strategy.finetune.train import decode_for_metrics, predict_windows, resolve_scale
 from f1strategy.seqbert.masking import SeqMasker
+
+
+def first_end_frames(races, ck_other: dict) -> dict[int, int]:
+    """Per race (index in ``races``) the first frame at which a window of ANOTHER scale (checkpoint ``ck_other``) can end."""
+    sc = resolve_scale(ck_other["scale"], {"n_tokens": ck_other["n_tokens"]})
+    ix = finetune_index(races, sc, DEFAULT_HOP_S[ck_other["scale"]])
+    first: dict[int, int] = {}
+    for k in range(len(ix)):
+        ri = ix.items[k][0]
+        e = end_frame(ix, k)
+        first[ri] = min(first.get(ri, e), e)
+    return first
 
 
 def subset(t: dict, mask_windows: np.ndarray) -> dict:
@@ -66,6 +79,12 @@ def main(argv=None) -> dict:
         default="",
         help='extra ensemble rows, e.g. "B=0,1,2;E=3,4,5;Bgbdt=0,1,2,gbdt,gbdt,gbdt" '
         "(numbers = positions in --run, baseline names allowed, repeated = heavier); rows are named ens_<name>",
+    )
+    ap.add_argument(
+        "--match-from",
+        default="",
+        help="best.pt of a run of ANOTHER scale (e.g. a 10-lap run when scoring 1-lap runs): only windows that end "
+        "where that scale's windows can end (after its first full window of every race) are scored, so the two scales see the same part of the race",
     )
     ap.add_argument("--report", default="")
     ap.add_argument("--hop-s", type=float, default=None)
@@ -104,6 +123,9 @@ def main(argv=None) -> dict:
         raise SystemExit(f"no labelled races in {a.years}: scrape, cache and label them first")
     te_ix = finetune_index(te_races, scale, hop_s)
     te_t = window_targets(te_ix, te_lab)
+    ck_match = torch.load(a.match_from, map_location="cpu", weights_only=False) if a.match_from else None
+    if ck_match is not None:
+        te_t = M.mask_before(te_t, first_end_frames(te_races, ck_match))
     raws = {name: run_raw(m, c, te_ix, te_lab) for name, m, c in loaded}
     te_runs = [raws[n] for n, _, _ in loaded]
     groups = parse_groups(a.groups)
@@ -120,6 +142,8 @@ def main(argv=None) -> dict:
             raise SystemExit(f"no labelled races in --val-years {a.val_years}")
         va_ix = finetune_index(va_races, scale, hop_s)
         va_t = window_targets(va_ix, va_lab)
+        if ck_match is not None:
+            va_t = M.mask_before(va_t, first_end_frames(va_races, ck_match))
         va_raws = {name: run_raw(m, c, va_ix, va_lab) for name, m, c in loaded}
         va_runs = [va_raws[n] for n, _, _ in loaded]
         if a.ensemble and len(va_raws) > 1:

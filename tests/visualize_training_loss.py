@@ -1,5 +1,4 @@
 import argparse
-import json
 import os
 import re
 
@@ -8,110 +7,111 @@ import numpy as np
 
 
 def parse_log(log_path):
-    train_steps = []
-    train_loss = []
-    train_B, train_T, train_P, train_Z = [], [], [], []
+    train_steps, train_loss = [], []
+    val_steps = []
+    val_mean, val_short, val_med, val_long = [], [], [], []
 
-    val_steps, val_all, val_select = [], [], []
-    val_A, val_B, val_C, val_D = [], [], [], []
+    # Task-specifikus MSE-k tárolói (pl. short eval alapján vagy átlagolva)
+    task_steps = []
+    task_B, task_T, task_P, task_Z = [], [], [], []
 
-    if log_path.endswith(".jsonl"):
-        print(f"JSONL log feldolgozása: {log_path}")
-        steps_dict = {}
+    current_step = 0
+    print(f"Szöveges log feldolgozása: {log_path}")
 
-        with open(log_path, encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    data = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
+    train_pattern = re.compile(r"step\s+(\d+)\s+recon\s+loss\s+([\d\.]+)")
+    val_pattern = re.compile(
+        r"\[val\]\s+mean MSE over BTPZ:\s+([\d\.]+).*?\[short\s+([\d\.]+),\s+medium\s+([\d\.]+),\s+long\s+([\d\.]+)\]"
+    )
+    eval_pattern = re.compile(r"\[eval\s+(short|medium|long)\]\s+\{(.*?)\}")
 
-                step = data.get("step", data.get("train_step"))
-                if step is not None:
-                    step = int(step)
-                    if step not in steps_dict:
-                        steps_dict[step] = {}
-                    steps_dict[step].update(data)
+    with open(log_path, encoding="utf-8") as f:
+        for line in f:
+            # 1. Train lépés
+            train_match = train_pattern.search(line)
+            if train_match:
+                current_step = int(train_match.group(1))
+                train_steps.append(current_step)
+                train_loss.append(float(train_match.group(2)))
+                continue
 
-        sorted_steps = sorted(steps_dict.keys())
-        for s in sorted_steps:
-            d = steps_dict[s]
-            if "loss" in d or "train_loss" in d:
-                train_steps.append(s)
-                train_loss.append(float(d.get("loss", d.get("train_loss", np.nan))))
+            # 2. Validációs összesítő (itt mentjük a lépést is a validációhoz)
+            val_match = val_pattern.search(line)
+            if val_match:
+                val_steps.append(current_step)
+                val_mean.append(float(val_match.group(1)))
+                val_short.append(float(val_match.group(2)))
+                val_med.append(float(val_match.group(3)))
+                val_long.append(float(val_match.group(4)))
+                continue
 
-                train_B.append(float(d.get("loss_B", np.nan)))
-                train_T.append(float(d.get("loss_T", np.nan)))
-                train_P.append(float(d.get("loss_P", np.nan)))
-                train_Z.append(float(d.get("loss_Z", np.nan)))
-
-    else:
-        print(f"Szöveges log (regex) feldolgozása: {log_path}")
-        train_pattern = re.compile(
-            r"step\s+(\d+)\s+\|\s+loss=([\d\.]+)\s+A=([\d\.]+)\s+B=([\d\.]+)\s+C=([\d\.]+)\s+D=([\d\.]+)\s+\|\s+gnorm\s+([\d\.]+)\s+\|\s+lr\s+([\d\.e\-\+]+)"
-        )
-        val_pattern = re.compile(
-            r"\[val\s+@\s+(\d+)\]\s+select\(ABD\)\s+([\d\.]+)\s+\|\s+all\s+([\d\.]+)\s+\|\s+A=([\d\.]+)\s+B=([\d\.]+)\s+C=([\d\.]+)\s+D=([\d\.]+)"
-        )
-
-        with open(log_path, encoding="utf-8") as f:
-            for line in f:
-                train_match = train_pattern.search(line)
-                if train_match:
-                    train_steps.append(int(train_match.group(1)))
-                    train_loss.append(float(train_match.group(2)))
-                    train_B.append(float(train_match.group(4)))
-                    train_T.append(float(train_match.group(3)))
-                    train_P.append(float(train_match.group(5)))
-                    train_Z.append(float(train_match.group(6)))
-                    continue
-
-                val_match = val_pattern.search(line)
-                if val_match:
-                    val_steps.append(int(val_match.group(1)))
-                    val_select.append(float(val_match.group(2)))
-                    val_all.append(float(val_match.group(3)))
-                    val_A.append(float(val_match.group(4)))
-                    val_B.append(float(val_match.group(5)))
-                    val_C.append(float(val_match.group(6)))
-                    val_D.append(float(val_match.group(7)))
+            # 3. Egyedi taskok MSE értékei (használjuk a 'short' értékelést reprezentánsként)
+            eval_match = eval_pattern.search(line)
+            if eval_match:
+                scale = eval_match.group(1)
+                if scale == "short":  # A tisztább grafikon kedvéért a short értékelést veszzük alapul
+                    metrics_str = eval_match.group(2)
+                    try:
+                        # Gyors dictionary parser a logban lévő dict stringhez
+                        metrics = eval("{" + metrics_str + "}")
+                        task_steps.append(current_step)
+                        task_B.append(metrics.get("B/mse", np.nan))
+                        task_T.append(metrics.get("T/mse", np.nan))
+                        task_P.append(metrics.get("P/mse", np.nan))
+                        task_Z.append(metrics.get("Z/mse", np.nan))
+                    except Exception:
+                        pass
 
     return {
-        "train": (train_steps, train_loss, train_B, train_T, train_P, train_Z),
-        "val": (val_steps, val_select, val_all, val_A, val_B, val_C, val_D),
+        "train": (train_steps, train_loss),
+        "val": (val_steps, val_mean, val_short, val_med, val_long),
+        "tasks": (task_steps, task_B, task_T, task_P, task_Z),
     }
 
 
 def plot_training_metrics(data, output_path):
-    train_steps, train_loss, train_B, train_T, train_P, train_Z = data["train"]
-    val_steps, val_select, val_all, val_A, val_B, val_C, val_D = data["val"]
+    train_steps, train_loss = data["train"]
+    val_steps, val_mean, val_short, val_med, val_long = data["val"]
+    task_steps, task_B, task_T, task_P, task_Z = data["tasks"]
 
     if not train_steps:
         print("Figyelem: Nem található tanítási lépés az adatok között!")
         return
 
-    fig, axes = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+    # Két paneles elrendezés (Fent a Lossok, Lent a Task MSE-k)
+    fig, axes = plt.subplots(2, 1, figsize=(10, 9), sharex=True)
 
-    axes[0].plot(train_steps, train_loss, label="Train Total Loss", color="tab:blue", alpha=0.8)
+    # --- 1. Panel: Train Loss és Val MSE ---
+    axes[0].plot(train_steps, train_loss, label="Train Recon Loss", color="tab:blue", alpha=0.8)
     if val_steps:
-        axes[0].plot(val_steps, val_all, label="Val All", color="tab:orange", marker="o", linestyle="--")
-        axes[0].plot(val_steps, val_select, label="Val Select (ABD)", color="tab:green", marker="x", linestyle=":")
-    axes[0].set_ylabel("Loss / Metric")
-    axes[0].set_title("BERT Pre-training: Loss and Validation Performance")
-    axes[0].legend(loc="upper right")
+        axes[0].plot(
+            val_steps,
+            val_mean,
+            label="Val Mean MSE (BTPZ)",
+            color="tab:orange",
+            marker="o",
+            linestyle="--",
+            linewidth=2,
+        )
+        axes[0].plot(val_steps, val_short, label="Val Short", color="tab:gray", alpha=0.5, linestyle=":")
+        axes[0].plot(val_steps, val_med, label="Val Medium", color="tab:olive", alpha=0.5, linestyle=":")
+        axes[0].plot(val_steps, val_long, label="Val Long", color="tab:purple", alpha=0.5, linestyle=":")
+
+    axes[0].set_ylabel("Loss / MSE")
+    axes[0].set_title("F1 SeqBERT: Training Loss & Validation Performance")
+    axes[0].legend(loc="upper right", fontsize=9)
     axes[0].grid(True, alpha=0.3)
 
-    axes[1].plot(train_steps, train_B, label="Task B (Ghost Car)", alpha=0.6)
-    axes[1].plot(train_steps, train_T, label="Task T (Tyre Set)", alpha=0.6)
-    axes[1].plot(train_steps, train_P, label="Task P (Pit-Return)", alpha=0.6)
-    axes[1].plot(train_steps, train_Z, label="Task Z (Zone)", alpha=0.6)
+    # --- 2. Panel: Egyedi Taskok MSE-jei (B, T, P, Z) ---
+    if task_steps:
+        axes[1].plot(task_steps, task_B, label="Task B MSE (Ghost Car)", marker=".", alpha=0.7)
+        axes[1].plot(task_steps, task_T, label="Task T MSE (Tyre Set)", marker=".", alpha=0.7)
+        axes[1].plot(task_steps, task_P, label="Task P MSE (Pit-Return)", marker=".", alpha=0.7)
+        axes[1].plot(task_steps, task_Z, label="Task Z MSE (Zone)", marker=".", alpha=0.7)
+
     axes[1].set_xlabel("Training Steps")
-    axes[1].set_ylabel("Task Loss")
-    axes[1].set_title("Individual Task Losses (Train)")
-    axes[1].legend(loc="upper right")
+    axes[1].set_ylabel("Task MSE")
+    axes[1].set_title("Individual Task Validation MSE Over Time")
+    axes[1].legend(loc="upper right", fontsize=9)
     axes[1].grid(True, alpha=0.3)
 
     output_dir = os.path.dirname(output_path)
@@ -121,7 +121,7 @@ def plot_training_metrics(data, output_path):
     plt.tight_layout()
     plt.savefig(output_path, dpi=300)
     print(f"Visualization saved successfully as '{output_path}'.")
-    plt.show()
+    # plt.show()
 
 
 if __name__ == "__main__":
