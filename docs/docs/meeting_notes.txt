@@ -26,3 +26,41 @@ Baselineok: ???
 Teszt: 2026-os szezon versenyein
 ->Olyan címkézett szekvenciákat kell gyártani bemenetként, ahol pl. Hamilton esetén első 10 kör, a 10. kör végén 12 körre van a kerékcsere (tehát a 22. körben), utána 7. körtől nézve 10 kör, itt a szekvencia végére (17. kör) már csak 5 környire van
 ->Köridőt itt bevenni, mint feature elég árulkodó, mert a pit körök sokkal lassabbak, mint a körülöttük lévők, hiszen a pit lane-ben nagyon lassan kell menniük, de lehet olyan szekvencia ami tartalmaz kerékcserét ettől függetlenül, ezért ezt az adatot és bármi más ilyen árulkodó dolgot a bemeneti szekvencia adatkészletéből el kell távolítani.
+
+2026.11.05:
+ppt jövő hétre
+szakdogára: webapp, verseny kiválasztás, ott egy adott versenyzőnek a taktika kiválasztása, kézis gépen hostolva
+ppt-be demó videó
+
+2026.11.12:
+1:
+E/1
+Nem BME, hanem inkább TMIT kiemelése
+
+2:
+OK
+
+3-4-5-6:
+story line vonal finomítása --> FastF1 API --> adatok gyűjtése 2019-2026 --> 
+128 token (modell részbe), train-val-test split out-of place (adatblokk végére, tanítás elejére kéne tenni) --> 2019-2026 Bahrain asszem ==>
+3: hogyan szedtem össze, milyet, milyen intervallumban (adatgyűjtés)
+4: Tök jó, konkrétan meg lehetne jeleníteni az adatokat, gráfok készítésének módja, fontos tudni kinek hány feature van + 1-1-et bemutatni (gráfkészítés)
+6: szekvenciahossz az adathoz, gráfkászítés után, majd ezután az adatsplit, kéne adat a szekvenciahosszakról
+
+5: 
+pre-training ábrákon keresztüli bemutatása
+rekonstrukciós fej nem kell mindegyiknél, helyette feladat neve inkább
+Bal oldalra bullet point lényeg, másik kép mellette, utána csak a nagy gépre, aztán a pre-training fejek
+0. lépés nem feltétlenül kell, helyette inkább a GIF a gráf vektor átalakításra
+itt jöhetne az egy hosszra hozás
+flatten és szektor rövid elmondása, gráf vektorrá alakítás lépés részletezése
+
+6:
+GNN jobb teljesítmény számokkal bemutatva, szekvenciahosszokhoz kör/másodperc odaírása
+
+7:
+Fine tuning metódus konkrét bemutatása
+
+8: 
+végső eredmény táblázat berakása és úgy beszélni róla (modell feloldása A/B), metrika berakása
+Konkrét metrikát nézni (pre-trainingél is elmondani hogy mivel mérem a loss-t MSE, Cos-sim)

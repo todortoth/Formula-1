@@ -1,47 +1,32 @@
 1. ábra
-Flowchart LR
-    API[("F1 live timing<br/>FastF1 API")] --> S1
-    subgraph S1 ["Versenyek feldolgozása"]
-        SA["SessionAnalyser<br/>pálya, versenyirányítás<br/>telemetria, időmérés"] --> SB["SequenceBuilder<br/>10 Hz adatok"]
-    end
-    S1 --> PQ[("parquet_datasets/<br/>YEAR_round_NN.ds<br/>versenyenkénti adathalmaz")]
-    PQ --> C["cache.py<br/> normalizálás,<br/>128 pályapont"]
-    C --> NPY[("cache/YEAR_round_NN")]
-    NPY --> Q["seqbert.train<br/>T hosszú gráfok,<br/>gráf->vektor, időbeli figyelem"]
-    Q --> QK[("finetune.train<br/>felügyelt finomhangolás (boxkiállás predikció)")]
-    SC["scrape.sh<br/>minden verseny (2019-2025)"] -.-> S1
-
 flowchart LR
     %% 1. SOR: Adatgyűjtés és folyamatos feldolgozás
     subgraph Sorszam1 ["1. Adatgyűjtés és folyamatos feldolgozás"]
         direction LR
-        API[("F1 live timing<br/>FastF1 API")] --> SA
-        SC["scrape.sh<br/>minden verseny (2019-2025)"] -.-> SA
+        SC["scrape.sh<br/>minden verseny<br/>(2019-2026)"] -.-> SA
+        API[("F1 telemetria<br/>FastF1 API")] --> SA
+        
+        SA["SessionAnalyser<br/>pálya,<br/>versenyirányítás<br/>telemetria,<br/>időmérés"] --> S1
         
         subgraph S1 ["Versenyek feldolgozása"]
             direction LR
-            SA["SessionAnalyser<br/>pálya, versenyirányítás<br/>telemetria, időmérés"] --> SB["SequenceBuilder<br/>10 Hz adatok"]
+            SB["SequenceBuilder<br/>10 Hz adatok"]
         end
         
-        SB --> PQ[("parquet_datasets/<br/>YEAR_round_NN.ds<br/>versenyenkénti adathalmaz")]
+        S1 --> PQ[("parquet_datasets/<br/>YEAR_round_NN.ds<br/>versenyenkénti<br/>adathalmaz")]
     end
 
     %% 2. SOR: Gyorstárazás és tanítási pipeline
     subgraph Sorszam2 ["2. Gyorstárazás és tanítási pipeline"]
         direction LR
-        C["cache.py<br/>normalizálás,<br/>128 pályapont"] --> NPY[("cache/YEAR_round_NN")]
-        NPY --> Q["seqbert.train<br/>T hosszú gráfok,<br/>gráf->vektor, időbeli figyelem"]
-        Q --> QK[("finetune.train<br/>felügyelt finomhangolás")]
+        C["cache.py<br/>normalizálás,<br/>128 pályapont"] --> NPY[("cache/<br/>YEAR_round_NN")]
+        NPY --> Q["seqbert.train<br/>T hosszú gráfok,<br/>gráf->vektor,<br/>időbeli figyelem"]
+        Q --> QK[("finetune.train<br/>felügyelt<br/>finomhangolás")]
     end
 
     %% Valódi összekötő él a két fázis között
     PQ --> C
 
-    %% REJTETT ÉL: Ez kényszeríti ki, hogy a 2. fázis az 1. fázis ALÁ kerüljön
-    Sorszam1 ~~~ Sorszam2
-    
-    %% Stílus a rejtett élhez, hogy biztosan láthatatlan legyen
-    linkStyle 5 stroke:#0000,stroke-width:0px;
 
 
 2. ábra
@@ -51,7 +36,7 @@ flowchart TD
         T2 -->|track_next: length_m| T3["T0002"]
     end
     
-    subgraph Pilóta Slotok
+    subgraph Pilóták
         VER["VER (Max Verstappen)"]
         HAM["HAM (Lewis Hamilton)"]
     end
@@ -68,7 +53,7 @@ flowchart TD
     style HAM fill:#bbf,stroke:#333,stroke-width:2px
 
 
-
+4. ábra
 flowchart LR
     subgraph Stádium 0 ["0. Ablakozás"]
         W["Ablak sorszáma: T gráf keret"]
@@ -82,49 +67,75 @@ flowchart LR
         V["T darab vektor + [CLS] token"] --> M["nn.TransformerEncoder<br/>(kétirányú figyelem az időben)"]
     end
     
-    subgraph Stádium III ["III. Pretext Fejek"]
-        M --> H1["Task B<br/>(Rekonstrukciós fej)"]
-        M --> H2["Task T<br/>(Rekonstrukciós fej)"]
-        M --> H3["Task P<br/>(Rekonstrukciós fej)"]
-        M --> H4["Task Z<br/>(Rekonstrukciós fej)"]
+    subgraph Stádium III ["III. Előfeladat Fejek"]
+        M --> H1["B Feladat<br/>(Szellemautó)"]
+        M --> H2["T Feladat<br/>(Gumikeverék)"]
+        M --> H3["P Feladat<br/>(Kiállásablak)"]
+        M --> H4["Z Feladat<br/>(Zóna)"]
     end
     
     W --> G1 --> V
 
+5. ábra:
+flowchart LR
+    %% Stílusok és Színek definíciója
+    classDef default fill:#fff,stroke:#333,stroke-width:1px,font-family:sans-serif,font-size:12px;
+    classDef inputStyle fill:#fff,stroke:#e1a2d4,stroke-width:2px;
+    classDef backboneStyle fill:#fff,stroke:#9eead3,stroke-width:2px;
+    classDef headsStyle fill:#fff,stroke:#ffd0a1,stroke-width:2px;
+    classDef tasksStyle fill:#fff,stroke:#bbf0ff,stroke-width:2px;
+    classDef labelsStyle fill:#fff,stroke:#b1f2b1,stroke-width:2px;
 
-flowchart TD
-    subgraph Input ["Bemenet és Szűrés (Scrubbing)"]
-        A[Verseny szekvencia ablak / T lépés] --> B[Input Scrubbing: finetune.scrub]
-        B --> C[Ujjlenyomatok törlése: in_pit, köridő...]
+    %% 1. BEMENET ÉS SZŰRÉS
+    subgraph Input ["0. Bemenet és Szűrés"]
+        A[T darab gráf] --> B[Adatszivárgás Megelőzése]
     end
+    style Input fill:#fff,stroke:#e1a2d4,stroke-width:1px,stroke-dasharray: 3 3
 
-    subgraph Backbone ["Pre-tréningelt Backbone (SeqF1Bert)"]
-        C --> D[Gráfenkóder: GNN / Flatten / Sector]
-        D --> E[Temporális TransformerEncoder]
-        E --> F[Poolozás: CLS + Utolsó token]
+    %% 2. BACKBONE
+    subgraph Backbone ["I. Előtanított hálózat"]
+        C[Gráfkódoló: GNN] --> D[Temporális BERT]
+        D --> E[Sűrítés: CLS token]
     end
+    style Backbone fill:#fff,stroke:#9eead3,stroke-width:1px,stroke-dasharray: 3 3
 
-    subgraph Heads ["Kimeneti Fejek (Head Types)"]
-        F --> G{Fej-architektúra opciók}
-        G -->|--head linear / mlp| H[Per-Slot fejek: külön blokk autónként]
-        G -->|--head car| I[Megosztott Per-Car fej: univerzális MLP]
+    %% 3. KIMENETI FEJEK
+    subgraph Heads ["II. Kimeneti Fejek"]
+        F[--head linear / mlp <br> Autónkénti fejek]
+        G[--head car <br> Megosztott univerzális MLP]
     end
+    style Heads fill:#fff,stroke:#ffd0a1,stroke-width:1px,stroke-dasharray: 3 3
 
-    subgraph Tasks ["Stratégiai Predikciós Feladatok"]
-        H --> J[Pit predikció: pit]
-        H --> K[Körök száma: laps]
-        H --> L[Gumiabroncs keverék: cmp]
-        H --> M[Nincs több kiállás: nomore]
-        I --> J
-        I --> K
-        I --> L
-        I --> M
+    %% 4. PREDIKCIÓS FELADATOK
+    subgraph Tasks ["III. Stratégiai Feladatok"]
+        H[Feladat: Kiállási előrejelzés]
+        I[Feladat: Körök száma]
+        J[Feladat: Gumiabroncs keverék]
+        K[Feladat: Nincs több kiállás]
     end
+    style Tasks fill:#fff,stroke:#bbf0ff,stroke-width:1px,stroke-dasharray: 3 3
 
-    subgraph Labels ["Jövőbeli Címkék (Ground Truth)"]
-        N[(Parquet adatok: jövőbeli ablak)] --> O[finetune.labels: ft_labels.npz]
-        O --> J
-        O --> K
-        O --> L
-        O --> M
+    %% 5. JÖVŐBELI CÍMKÉK
+    subgraph Labels ["Címkék"]
+        L[(Parquet adatok)]
     end
+    style Labels fill:#fff,stroke:#b1f2b1,stroke-width:1px,stroke-dasharray: 3 3
+
+    %% Fő folyamat összekötése
+    B --> C
+    E --> F
+    E --> G
+    
+    %% Fejek összekötése a feladatokkal
+    F --> Tasks
+    G --> Tasks
+    
+    %% Címkék bevezetése a feladatokhoz
+    L -.-> Tasks
+
+    %% Osztályok hozzárendelése a boxokhoz a szép szegélyekért
+    class A,B inputStyle;
+    class C,D,E backboneStyle;
+    class F,G headsStyle;
+    class H,I,J,K tasksStyle;
+    class L labelsStyle;
