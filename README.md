@@ -88,6 +88,8 @@ representation-learning foundation for that.
   - [Test 2026: the final configurations](#test-season-2026-the-final-configurations)
   - [Test 2026: mixed ensemble](#test-season-2026-mixed-ensemble-with-and-without-the-embedding)
   - [Status and limitations](#status-and-limitations)
+- **Stage 6 - web app**
+  - [Web app (test-season demo)](#web-app-test-season-demo)
 - **Archive - the single-snapshot model (code removed)**
   - [Archived: the single-snapshot model](#archived-the-single-snapshot-model)
   - [Model](#model-snapshot-model)
@@ -129,6 +131,7 @@ flowchart LR
 | **4. Temporal pre-training** | `python -m f1strategy.seqbert.train` | the caches (windows of 10 s / 1 lap / 10 laps, one scale per run or `--scale mixed` for all three at once) | `runs/<n>/best.pt` (best weights; `best_<scale>.pt` per scale in a mixed run), `ckpt.pt` (latest, resumable), `log.jsonl`, `args.json` | `base` preset with the GNN encoder: 16.4 M parameters, ~0.085 s/step in the first scale tests; see [measured cost](#measured-cost-and-the-benchmark) |
 | **5. Fine-tuning**           | `python -m f1strategy.finetune.labels`, `.train`, `.evaluate` | the Parquet datasets (labels), the caches, a pre-trained `best.pt` | `cache/<race>/ft_labels.npz`, `runs/ft_*/best.pt`, `log.jsonl`, test report (JSON) | frozen mode: features computed once, head trains in seconds; see [Supervised fine-tuning](#supervised-fine-tuning) |
 | **6. Inspection**            | `tests/test_dataset.py`, `tests/visualize_training_loss.py`, `python -m f1strategy.seqbert.bench`, `python -m f1strategy.seqbert.visualize` | a dataset / `log.jsonl` / a cache | verification GIF, loss plot, per-step timing and memory, report figures | - |
+| **7. Web app**               | `python -m f1strategy.webapp.app` | the caches and labels, the six runs `runs/long_{B,E}_s{0,1,2}` | `webapp_cache/predictions/`, `webapp_cache/gifs/` | the first request for a race scores its windows once; see [Web app](#web-app-test-season-demo) |
 
 Each stage only depends on the files written by the previous one, so any stage can be re-run on its own. The **schema** is
 the contract between the stages: the feature name lists (42 driver in the training schema, 23 global, 7 edge, 18 static track features, 6 flag
@@ -167,6 +170,7 @@ from the lists in `pretrain/schema.py`.
   pit-stop questions (pit within H laps, laps to the stop, compound received) from labels cut out of the Parquet data, with the stop's
   fingerprints scrubbed from the input, four freeze modes (`frozen`, `partial`, `full`, `scratch`), a per-slot and a shared per-car head, and `prior` / `rule` / gradient-boosting baselines; trained on
   2019-2024, validated on 2025, tested on 2026.
+- **Web app.** `python -m f1strategy.webapp.app` runs the final ensemble BE on a labelled race for a chosen driver and shows the race GIF, the predicted strategy next to the actual one and the pit probability curve (see [Web app](#web-app-test-season-demo)).
 - **Animated GIF** of the same arrays (flag-coloured track, cars with trails, leaderboard, flag banner), next to the
   original point-by-point graphs and PNGs, which are unchanged.
 - **Model-ready export.** Fixed, named feature schema (one-hot, sin/cos, zero-filled with masks), optional
@@ -2180,6 +2184,58 @@ Mean over the 16 races of the first group minus the second, 95 % bootstrap inter
 * **The label is conditional where it must be.** `laps` and `cmp` are scored only where a next stop exists; a car without one is covered by `nomore`.
 * **Rare cases.** Red-flag stops, cars that stop twice in a few laps, wet races (intermediate / wet are rare classes) and safety-car stops (cheap stops are not predictable from the sequence) are in the data as they are.
 
+## Web app (test-season demo)
+
+`f1strategy.webapp` is a small web app that runs the **final ensemble BE** of the [fine-tuning results](#final-results-2026-test-season) on any labelled race of 2019-2026, with the **test season (2026)** as the intended use.
+Load a race first (this reads its drivers and its lap bounds), then pick a driver and the lap range of the replay (lap numbers outside the race are refused); the page shows
+
+* the **race replay** as a GIF (made like the continuous mode of the CLI: 1 s sampling, at most 300 frames, 10 fps, `RaceAnimator`, see [Animation](#animation); the chosen driver is drawn larger with a black outline, and one click replays the laps around each of his actual stops),
+* the **predicted strategy** (stop laps and tyres) next to the stops the driver **actually** made,
+* the ensemble's **probability of a stop within 5 laps** over the race, with predicted and actual stops marked (optionally also the pit-within-1 and pit-within-3 curves),
+* a **whole-field overview** (closed by default): one row per car in finishing order with predicted and actual stops, a one-line agreement summary, and a click on a row opens that driver.
+
+Every module can be collapsed; which ones are open, the last race, driver and lap range are remembered in the browser, and Enter loads the race or runs the model. The first stint shows the tyre the driver actually started on (read from the FastF1 laps), the driver chip uses the team colour of the FastF1 results, and the stop-lap estimates and the threshold slider apply to the overview too.
+
+```bash
+pip install -e ".[web]"               # Flask, the only extra dependency
+python -m f1strategy.webapp.app       # from the repo root, then open http://127.0.0.1:2000
+```
+
+It needs what the evaluation needs: the races scraped, cached and labelled (`cache/<year>_round_NN/` with `ft_labels.npz`, see [Seasons](#seasons)) and the six member runs in `runs/`.
+The FastF1 cache `~/fastf1_cache` is enabled at start-up (`fastf1.Cache.enable_cache`), so races that are already cached are read locally and the F1 API is not contacted for them; race names, driver names, team colours, starting tyres and the replay GIFs come from it.
+Only races that have labels are listed, grouped by season. Seasons before 2026 were used for training (2019-2024) or for selection and thresholds (2025), and the pre-training saw 2019-2025, so the app flags those predictions as **not out-of-sample**; only 2026 is a clean test.
+Options (environment variables): `F1_MODEL_CACHE` (race caches, default `cache`), `F1_RUNS` (default `runs`), `F1_WEB_CACHE` (predictions and GIFs made by the app, default `webapp_cache`, safe to delete), `F1_YEARS` (default `2019-2026`), `F1_PORT` (default `2000`).
+
+| Part | What it does |
+|---|---|
+| `src/f1strategy/webapp/inference.py` | Loads `runs/long_B_s{0,1,2}` and `runs/long_E_s{0,1,2}` (`load_finetuned`), builds the 10-lap windows of one race exactly as `finetune.evaluate` does (`finetune_index`, `FtDataset`, `predict_windows`, same scrub), averages the six members with `finetune.ensembling.ensemble` (the `ens_BE` row), caches the result per race in `webapp_cache/predictions/<race>.npz` and extracts the stops (per driver and for the whole field). The first request for a race scores all its windows (about 70 per race, six models); later requests are instant. |
+| `src/f1strategy/webapp/app.py` | Flask routes: `/api/races`, `/api/race?race=` (drivers and lap bounds), `POST /api/predict`, `/api/field?race=` (predicted and actual stops of every car with an agreement summary), `/api/gif?race=&from=&to=&driver=` (GIFs are cached in `webapp_cache/gifs/`). |
+| `src/f1strategy/webapp/gif.py` | The replay GIF (CLI continuous mode, driver highlighted); no torch needed. |
+| `src/f1strategy/webapp/static/index.html` | The single-page front end, with a threshold slider and a stop-lap estimator selector that re-read the stops from the cached predictions. |
+
+**How the predicted strategy is read from the model.** The decision threshold for "stop within 5 laps" is the one `evaluate` fitted for `ens_BE` on the 2025 season
+(`thresholds.ens_BE.pit5` of `runs/eval/test2026_groups_long.json`, 0.46; 0.5 if that report is missing). Each connected run of windows above the threshold (one bump of the probability curve, ended when the curve stays below it for more than 3 laps) is one expected stop.
+A run needs at least two windows or one window with a probability of at least 0.5; a single weaker one is treated as noise. The tyre is the compound with the highest mean probability over the run. When no stop is predicted the page says why (peak probability against the threshold), and a slider moves the threshold to see how the stops change.
+The actual stops are read from the same labels the model is scored against (stop lap = laps completed + laps to go, the label convention of [The tasks](#the-tasks-and-how-the-labels-are-cut), in the car's own laps).
+
+**Where the stop lap comes from.** The pit5 curve decides *that* a stop is coming; four estimators can place the stop *lap* (selectable in the page): the first window of the bump where the pit-within-1, -3 or -5 head crosses its own threshold (`p1`, `p3`, `p5`; stop lap = that window's lap + h - 1, causal: nothing after the alarm is used), or the median of the laps-to-stop head over the bump (`reg`).
+The shorter-horizon heads have lower F1 and AP than pit5 (see the results tables), so they are not used to *detect* stops, only to place them. Measured once on the 16 test races (423 real stops; the app predicted 307 stops, 252 of them within 10 laps of a real stop; a predicted stop is compared with the nearest real one; error = predicted - actual, in laps):
+
+| Estimator | stops it places | MAE | median abs. error | bias | within 1 lap | within 3 laps |
+|---|---|---|---|---|---|---|
+| `p1` pit-within-1 first alarm | 168 | **2.73** | **1** | -2.10 | **53 %** | **67 %** |
+| `p3` pit-within-3 first alarm | 205 | 3.31 | 2 | -2.02 | 32 % | 64 % |
+| `p5` pit-within-5 first alarm | 223 | 3.66 | 3 | -1.44 | 26 % | 54 % |
+| `reg` laps-to-stop head | 248 | 3.65 | 3 | +1.73 | 22 % | 52 % |
+
+`p1` is the most accurate but never fires inside the bump for a third of the stops (84 of 252), so the default is `p1` with `reg` as the fallback for those (the page shows which one was used for each stop); the rows are computed on different subsets of the stops, so they are not strictly comparable.
+The alarms come early (negative bias: the heads fire a little before the stop) and the laps-to-stop head late. Detection at the fitted threshold: 63 % of the real stops (267 of 423) have a predicted stop within 10 laps, and 82 % of the predicted stops (252 of 307) are within 10 laps of a real one.
+
+**What this is not.** It is the *model's expectation* of the driver's strategy, not an optimiser: the network answers when a car is likely to pit, onto which compound and whether it stops again, it does not search for the fastest strategy.
+Read it with the numbers of the test season in mind (BE: pit5 AUC 0.800, average precision 0.455; laps to the next stop off by 5.2 laps on average; compound accuracy 0.611, 16 races), so a predicted stop lap is a rough estimate.
+10-lap windows need ten laps of history, so there are no predictions for the first laps of a race, and a car is only scored while it is on track, running and still has a stop ahead of it or is classified as having none (the `valid` rule of the labels).
+Windows end every 60 s and overlap heavily, so the curve is dense but not independent.
+
 ## Archived: the single-snapshot model
 
 The first pre-training model encoded **one snapshot at a time**: its tokens were the 151 nodes of one graph (`[GLOBAL]`, 22 driver
@@ -2480,10 +2536,15 @@ Formula-1/
 │   │   ├── train.py              fine-tuning loop (frozen mode: features computed once)
 │   │   ├── weights.py            class weights for the imbalanced fine tuning tasks
 │   │   └── evaluate.py           model vs baselines on a test season, per race
-│   └── pretrain/
-│       ├── schema.py             feature lists, task groups, leak maps, per-race normalisation
-│       ├── cache.py              Parquet datasets -> memory-mappable race caches
-│       └── data.py               RaceCache, PretrainDataset, validation split, frame weights
+│   ├── pretrain/
+│   │   ├── schema.py             feature lists, task groups, leak maps, per-race normalisation
+│   │   ├── cache.py              Parquet datasets -> memory-mappable race caches
+│   │   └── data.py               RaceCache, PretrainDataset, validation split, frame weights
+│   └── webapp/
+│       ├── app.py                Flask app: races, drivers, prediction, race GIF (python -m f1strategy.webapp.app)
+│       ├── inference.py          ensemble BE on one race (as in finetune.evaluate), cached per race; stop extraction
+│       ├── gif.py                race replay GIF with the chosen driver highlighted
+│       └── static/index.html     single-page front end
 ├── tests/
 │   ├── unit/                     one module at a time
 │   ├── integration/              end to end, causality, CLI
@@ -2512,6 +2573,8 @@ Directories that scripts create (large ones are not meant to be committed; check
 | `runs/<name>/`           | `seqbert.train` | `best.pt` (best weights), `ckpt.pt` (latest evaluation point with optimiser, resumable), `args.json`, `log.jsonl` |
 | `cache/<race>/ft_labels.npz` | `finetune.labels` | fine-tuning labels per cache frame and car (laps to the next stop, compound, no more stops, valid) plus a raw strategy-feature table every 10 s |
 | `runs/ft_<name>/`        | `finetune.train` | `best.pt` (backbone + new head), `args.json`, `log.jsonl` with the validation metrics; `report_*.json` from `finetune.evaluate` |
+| `webapp_cache/predictions/` | `f1strategy.webapp` | `<race>.npz`: the ensemble's predictions and the labels for every window and car of a race (cache of the web app, safe to delete) |
+| `webapp_cache/gifs/`     | `f1strategy.webapp` | race GIFs by race and lap range (cache of the web app, safe to delete) |
 | `figures/`               | `seqbert.visualize` | the five report figures of the temporal model (copies used in this README live in `docs/images/seqbert-*.png`) |
 | `train.log`, `nohup.out` | `nohup` | console output of a training run / of an early scrape (`nohup.out` is git-ignored) |
 | `docs/docs/`             | by hand | project notes: see [Related work](#related-work) |
@@ -2534,6 +2597,8 @@ the pre-training schema drops `official_position`, `pos_age_s` and `car_age_s` (
 **Supervised fine-tuning (also unreleased).** New `f1strategy.finetune` package (labels, scrub, dataset, model, losses, metrics, baselines, train, evaluate) and
 `tests/finetune`: labels for the next tyre-change stop cut from the Parquet data, input scrub levels, four freeze modes, a new head replacing the pre-training heads,
 season-based train / validation / test split and prior / rule / gradient-boosting baselines. Optional dependency: `scikit-learn` (only for the `gbdt` baseline).
+
+**Web app (also unreleased).** New sub-package `f1strategy.webapp` (`python -m f1strategy.webapp.app`, port 2000): a Flask app that runs the BE ensemble for a chosen race and driver and shows the race GIF, the predicted and the actual stops and the pit probability curves; the stop lap is placed by the pit-within-1 head with the laps-to-stop head as fallback. Optional dependency: `flask` (`pip install -e ".[web]"`).
 
 **0.4.0 (10 Hz and Parquet).** Two new driver features (`pos_age_s`, `car_age_s`, so 45 in total),
 `RaceGraphBuilder.snapshot()` (plain data; `build()` now wraps it and returns the same graph), `GraphExporter.export_snapshot()`

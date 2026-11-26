@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>F1 Strategy Predictor</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%23e10600'/%3E%3Ctext x='32' y='43' font-family='Arial' font-weight='700' font-size='30' text-anchor='middle' fill='white'%3EF1%3C/text%3E%3C/svg%3E">
+<style>
+:root{--bg:#f6f6f4;--card:#fff;--fg:#15151e;--mut:#6b6b76;--line:#e2e2de;--red:#e10600;--S:#e10600;--M:#f5c400;--H:#cfcfcf;--I:#2e9e4f;--W:#2b6cd4}
+@media (prefers-color-scheme:dark){:root{--bg:#121218;--card:#1c1c26;--fg:#f1f1f4;--mut:#9a9aa8;--line:#2e2e3a;--H:#e6e6e6}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,sans-serif}
+header{padding:16px 24px;border-bottom:3px solid var(--red);display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+header b{font-size:20px}header span{color:var(--mut);font-size:13px}
+main{max-width:1100px;margin:0 auto;padding:20px;display:grid;gap:16px}
+footer{max-width:1100px;margin:0 auto;padding:4px 20px 28px;color:var(--mut);font-size:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px;min-width:0}
+.controls{display:flex;flex-wrap:wrap;gap:12px;align-items:end}
+label{display:grid;gap:4px;font-size:12px;color:var(--mut)}
+select,input,button{font:inherit;padding:8px 10px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg);max-width:100%}
+input[type=number]{width:80px}button{background:var(--red);color:#fff;border:0;font-weight:600;cursor:pointer}button:disabled{opacity:.5;cursor:default}
+.drv{display:flex;align-items:center;gap:8px}.dot{display:inline-block;width:12px;height:12px;border-radius:50%;flex:none;background:#8a8a94}
+.grid{display:grid;grid-template-columns:1.1fr 1fr;gap:16px;align-items:start}
+@media(max-width:800px){.grid{grid-template-columns:1fr}}
+@media(max-width:640px){main{padding:12px}.controls>*{flex:1 1 140px}.controls input[type=number]{width:100%}}
+details.mod{padding:0}
+details.mod>summary{list-style:none;cursor:pointer;padding:14px 16px;font-weight:700;font-size:15px;display:flex;align-items:center;gap:8px;user-select:none}
+details.mod>summary::-webkit-details-marker{display:none}
+details.mod>summary::before{content:"▸";color:var(--mut);display:inline-block;transition:transform .15s}
+details.mod[open]>summary::before{transform:rotate(90deg)}
+details.mod>summary small{font-weight:400;margin-left:auto}
+details.mod>.body{padding:0 16px 16px}
+img{max-width:100%;border-radius:8px}
+.msg{color:var(--mut);padding:24px;text-align:center}.err{color:var(--red)}
+.spin{display:inline-block;width:14px;height:14px;margin-right:8px;vertical-align:-2px;border:2px solid var(--line);border-top-color:var(--red);border-radius:50%;animation:sp .8s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+.bar{position:relative;height:34px;background:var(--line);border-radius:6px;overflow:hidden;margin:6px 0 2px}
+.seg{position:absolute;top:0;bottom:0;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:#111}
+.tag{display:inline-block;padding:1px 8px;border-radius:99px;font-size:12px;font-weight:700;color:#111;white-space:nowrap}
+.tw{overflow-x:auto}table{width:100%;border-collapse:collapse;font-size:14px}td,th{text-align:left;padding:5px 8px 5px 0;border-bottom:1px solid var(--line);vertical-align:top}
+td:nth-child(-n+4),th:nth-child(-n+4){white-space:nowrap}th{color:var(--mut);font-weight:500;font-size:12px}
+small{color:var(--mut)}.who{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.chip{background:var(--card);color:var(--fg);border:1px solid var(--line);font-weight:500;font-size:13px;padding:5px 10px}
+.fw{overflow-x:auto}.fw svg{min-width:640px}.frow{fill:var(--fg);opacity:0;cursor:pointer}.frow:hover{opacity:.07}.frow.sel{opacity:.12}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:12px;color:var(--mut);margin-top:6px;align-items:center}
+.legend i{display:inline-block;vertical-align:middle}
+</style>
+</head>
+<body>
+<header><b>F1 Strategy Predictor</b><span>pit-stop predictions of the final ensemble BE</span></header>
+<main>
+  <div class="card controls" id="ctl">
+    <label>1. Race<select id="race"></select></label>
+    <button id="load">Load race</button>
+    <label>2. Driver<span class="drv"><span class="dot" id="swatch"></span><select id="driver" disabled></select></span></label>
+    <label>Replay laps from<input id="from" type="number" value="1" min="1" disabled></label>
+    <label>to<input id="to" type="number" value="10" min="1" disabled></label>
+    <button id="go" disabled>Run model</button>
+    <div id="warn" class="err" style="flex-basis:100%;font-size:13px;min-height:18px"></div>
+  </div>
+
+  <div class="grid">
+    <details class="card mod" id="m-replay" open><summary>Race replay</summary><div class="body">
+      <div id="gif" class="msg">Select a race and driver, then run.</div>
+      <div id="chips" style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap"></div>
+    </div></details>
+    <details class="card mod" id="m-strat" open><summary>Predicted strategy</summary><div class="body">
+      <div id="strat" class="msg">No prediction yet.</div>
+    </div></details>
+  </div>
+
+  <details class="card mod" id="m-chart" open><summary>Probability of a pit stop within the next 5 laps</summary><div class="body">
+    <div id="thrbox" style="display:none;gap:8px 18px;flex-wrap:wrap;align-items:center;font-size:13px;margin-bottom:6px">
+      <label style="display:flex;gap:8px;align-items:center;flex:1;min-width:240px">Stop threshold <input id="thr" type="range" min="0.1" max="0.9" step="0.01" style="flex:1;padding:0"><b id="thrv"></b></label>
+      <label>Stop lap from <select id="loc"></select></label>
+      <label><input type="checkbox" id="c1"> show pit-within-1</label>
+      <label><input type="checkbox" id="c3"> show pit-within-3</label>
+    </div>
+    <div id="chart" class="msg">No prediction yet.</div>
+  </div></details>
+
+  <details class="card mod" id="m-field" data-closed><summary>Whole field overview <small>every car, predicted vs actual stops</small></summary><div class="body">
+    <div id="field" class="msg">Load a race, then open this panel.</div>
+  </div></details>
+</main>
+<footer>Ensemble BE = 3 × B + 3 × E fine-tuned runs. Seasons: training 2019–2024, validation 2025, test 2026; only 2026 is an out-of-sample test. The model estimates when a car is likely to pit and onto which tyre; it is not a strategy optimiser. The first stint shows the tyre the driver actually started on.</footer>
+<script>
+const $=id=>document.getElementById(id), COL={SOFT:'var(--S)',MEDIUM:'var(--M)',HARD:'var(--H)',INTERMEDIATE:'var(--I)',WET:'var(--W)'};
+const store={get(k,d){try{const v=localStorage.getItem('f1app.'+k);return v==null?d:JSON.parse(v)}catch(e){return d}},set(k,v){try{localStorage.setItem('f1app.'+k,JSON.stringify(v))}catch(e){}}};
+const spin=t=>`<span class="spin"></span>${t}`;
+async function api(u,o){const r=await fetch(u,o);if(!r.ok){let m=r.statusText;try{m=(await r.json()).error||m}catch(e){}throw new Error(m)}return r}
+const opts=(el,items,v,t)=>{el.innerHTML=items.map(i=>`<option value="${v(i)}">${t(i)}</option>`).join('')};
+const tag=c=>`<span class="tag" style="background:${COL[c]||'#999'}">${c}</span>`;
+
+let TOTAL=0, DRV={}, LAST=null, tmr, fieldTok=0, FIELD_KEY='';
+
+/* ---------- collapsible modules (state remembered) ---------- */
+document.querySelectorAll('details.mod').forEach(d=>{
+  d.open=store.get('open.'+d.id,!d.hasAttribute('data-closed'));
+  d.addEventListener('toggle',()=>{store.set('open.'+d.id,d.open);if(d.id==='m-field'&&d.open)loadField()});
+});
+
+/* ---------- step 1: race ---------- */
+async function init(){
+  const races=await (await api('/api/races')).json();
+  if(!races.length){$('warn').textContent='No labelled races found in the cache (F1_MODEL_CACHE / F1_YEARS).';return}
+  const lab={test:'test season',validation:'validation season',training:'training seasons'};
+  const years=[...new Set(races.map(r=>r.year))].sort((a,b)=>b-a);
+  $('race').innerHTML=years.map(y=>{const rs=races.filter(r=>r.year===y);
+    return `<optgroup label="${y} · ${lab[rs[0].split]}">`+rs.map(r=>`<option value="${r.id}">R${String(r.round).padStart(2,'0')} · ${r.name}</option>`).join('')+'</optgroup>'}).join('');
+  const last=store.get('last',null);
+  if(last&&[...$('race').options].some(o=>o.value===last.race))$('race').value=last.race;
+  $('race').onchange=reset;
+}
+function reset(){
+  TOTAL=0;DRV={};FIELD_KEY='';fieldTok++;
+  ['driver','from','to','go'].forEach(i=>$(i).disabled=true);$('driver').innerHTML='';$('warn').textContent='';
+  $('field').className='msg';$('field').textContent='Load a race, then open this panel.';
+}
+async function loadRace(){
+  reset();$('load').disabled=true;$('load').textContent='Loading…';$('warn').innerHTML=spin('Loading race (drivers, lap bounds)…');
+  try{
+    const r=await (await api('/api/race?race='+$('race').value)).json();
+    TOTAL=r.total_laps;DRV=Object.fromEntries(r.drivers.map(d=>[d.code,d]));
+    opts($('driver'),r.drivers,x=>x.code,x=>x.team?`${x.code} · ${x.name}`:x.code);
+    $('from').max=$('to').max=TOTAL;$('from').value=1;$('to').value=Math.min(10,TOTAL);
+    const last=store.get('last',null);
+    if(last&&last.race===$('race').value&&DRV[last.driver]){$('driver').value=last.driver;
+      if(last.from>=1&&last.to>=last.from&&last.to<=TOTAL){$('from').value=last.from;$('to').value=last.to}}
+    ['driver','from','to'].forEach(i=>$(i).disabled=false);$('warn').textContent='';swatch();check();
+    if($('m-field').open)loadField();
+  }catch(e){$('warn').textContent=e.message}
+  $('load').disabled=false;$('load').textContent='Load race';
+}
+const swatch=()=>{$('swatch').style.background=(DRV[$('driver').value]||{}).color||'#8a8a94'};
+function check(){
+  const a=+$('from').value,z=+$('to').value,ok=Number.isInteger(a)&&Number.isInteger(z)&&a>=1&&z>=a&&z<=TOTAL;
+  $('warn').textContent=ok?'':`Lap numbers must be whole numbers with 1 ≤ from ≤ to ≤ ${TOTAL} (this race has ${TOTAL} laps).`;
+  $('go').disabled=!ok||!TOTAL;return ok;
+}
+
+/* ---------- step 2: run ---------- */
+const predict=thr=>api('/api/predict',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({race:$('race').value,driver:$('driver').value,threshold:thr,locator:$('loc').value||undefined})}).then(r=>r.json());
+function bindThr(r){const t=$('thr');$('thrbox').style.display='flex';t.value=r.threshold;$('thrv').textContent=r.threshold;
+  if(!$('loc').options.length){$('loc').innerHTML=Object.entries(r.locators).map(([k,v])=>`<option value="${k}">${v}</option>`).join('');$('loc').value=r.locator}
+  const redo=async()=>{try{const x=await predict(+t.value);LAST=x;strategy(x);chart(x);if($('m-field').open)loadField()}catch(e){$('warn').textContent=e.message}};
+  t.oninput=()=>{$('thrv').textContent=t.value;clearTimeout(tmr);tmr=setTimeout(redo,150)};
+  $('loc').onchange=redo;$('c1').onchange=$('c3').onchange=()=>chart(LAST)}
+function showGif(){
+  const race=$('race').value, driver=$('driver').value, a=$('from').value, z=$('to').value;
+  $('chips').innerHTML='';
+  $('gif').className='msg';$('gif').innerHTML=spin(`Rendering laps ${a}–${z} (first time can take a minute)…`);
+  const g=new Image();g.onload=()=>{$('gif').className='';$('gif').replaceChildren(g)};
+  g.onerror=async()=>{let m='GIF unavailable';try{m=(await (await fetch(g.src)).json()).error}catch(e){}$('gif').className='msg err';$('gif').textContent=m};
+  g.src=`/api/gif?race=${race}&from=${a}&to=${z}&driver=${driver}`;
+}
+function chips(stops){
+  $('chips').innerHTML=stops.map(s=>`<button class="chip" data-l="${s.lap}">Replay stop at lap ${s.lap}</button>`).join('');
+  document.querySelectorAll('.chip').forEach(b=>b.onclick=()=>{const l=+b.dataset.l;
+    $('from').value=Math.max(1,l-4);$('to').value=Math.min(TOTAL,l+4);if(check()){saveLast();showGif()}});
+}
+const saveLast=()=>store.set('last',{race:$('race').value,driver:$('driver').value,from:+$('from').value,to:+$('to').value});
+async function run(){
+  if(!check())return;
+  saveLast();swatch();
+  $('go').disabled=true;$('go').textContent='Running…';
+  const wait=spin('Running the ensemble (the first request for a race scores all its windows, this can take a minute)…');
+  $('strat').className=$('chart').className='msg';$('strat').innerHTML=$('chart').innerHTML=wait;
+  showGif();
+  try{
+    const r=await predict();
+    LAST=r;strategy(r);chart(r);chips(r.actual);bindThr(r);
+  }catch(e){$('strat').className=$('chart').className='msg err';$('strat').textContent=$('chart').textContent=e.message}
+  $('go').textContent='Run model';check();
+}
+
+/* ---------- strategy card ---------- */
+function timeline(stops,total,start){
+  const pts=[{lap:0,compound:start||null},...stops,{lap:total,compound:null}],segs=[];
+  for(let i=0;i<pts.length-1;i++){const c=pts[i].compound,l=pts[i].lap/total*100,w=(pts[i+1].lap-pts[i].lap)/total*100;
+    segs.push(`<div class="seg" title="${i?c||'':(start?'starting tyre: '+start:'starting tyre unknown')}" style="left:${l}%;width:${w}%;background:${c?COL[c]:'#999'};border-left:${i?'2px solid var(--card)':'0'}">${c?c[0]:'start'}</div>`)}
+  return `<div class="bar">${segs.join('')}</div>`;
+}
+function strategy(r){
+  const el=$('strat'),d=r.driver||{},st=r.start_compound;el.className='';
+  const rows=r.predicted.map((s,i)=>`<tr><td>Stop ${i+1}</td><td>Lap ${s.lap} <small>(${s.used})</small></td><td>${tag(s.compound)}</td><td>${Math.round(s.confidence*100)}%</td><td><small>${Object.entries(s.estimates).map(([k,v])=>v==null?`${k} –`:`${k} ${v}${s.error[k]==null?'':' ('+(s.error[k]>0?'+':'')+s.error[k]+')'}`).join(' · ')}</small></td></tr>`).join('');
+  const act=r.actual.map(s=>`Lap ${s.lap} ${tag(s.compound)}`).join(' &nbsp; ')||'no stop';
+  el.innerHTML=`<div class="who"><span class="dot" style="background:${d.color||'#8a8a94'}"></span><b>${d.code||''}</b><span>${[d.name,d.team].filter(x=>x&&x!==d.code).join(' · ')}</span>${st?`<span style="margin-left:auto"><small>started on</small> ${tag(st)}</span>`:''}</div>
+  <small>Model prediction</small>${timeline(r.predicted,r.total_laps,st)}
+  ${rows?`<div class="tw"><table><tr><th></th><th>Lap</th><th>Tyre</th><th>Confidence</th><th>Lap estimates (error vs nearest real stop)</th></tr>${rows}</table></div>`:`<p>No stop predicted. ${r.n_above===0?`The highest 5-lap pit probability was ${r.peak}, below the threshold ${r.threshold}.`:`${r.n_above} of ${r.n_windows} windows reached the threshold, too few or too weak to count as a stop (needs 2 windows or a probability of 0.5).`}</p>`}
+  <p><small>Actual race</small></p>${timeline(r.actual,r.total_laps,st)}<div>${act}</div>
+  <p><small>Ensemble BE (3×B + 3×E). Decision threshold ${r.threshold} (fitted on 2025).<br>p1 / p3 / p5 = first alarm of the pit-within-1 / 3 / 5 head, reg = laps-to-stop head (used wherever the chosen alarm never fires). Stop lap from: <b>${r.locators[r.locator]}</b>.</small></p>${r.split!=='test'?`<p class="err"><small>This race is in the ${r.split} data: the model was trained or tuned on this season, so the prediction is not an out-of-sample test.</small></p>`:''}`;
+}
+
+/* ---------- probability chart ---------- */
+function chart(r){
+  const {laps,pit_prob}=r.curve,W=1000,H=220,m=34,T=r.total_laps;
+  const x=l=>m+l/T*(W-m-8),y=p=>H-24-p*(H-40);
+  const pts=laps.map((l,i)=>`${x(l)},${y(pit_prob[i])}`).join(' ');
+  const ticks=[0,.5,1].map(p=>`<line x1="${m}" x2="${W-8}" y1="${y(p)}" y2="${y(p)}" stroke="var(--line)"/><text x="4" y="${y(p)+4}" fill="var(--mut)" font-size="11">${p}</text>`).join('');
+  const mk=(s,c,dy)=>`<line x1="${x(s.lap)}" x2="${x(s.lap)}" y1="10" y2="${H-24}" stroke="${c}" stroke-dasharray="${dy}" stroke-width="2"/>`;
+  const lbl=[0,Math.round(T/4),Math.round(T/2),Math.round(3*T/4),T].map(l=>`<text x="${x(l)}" y="${H-6}" fill="var(--mut)" font-size="11" text-anchor="middle">${l}</text>`).join('');
+  $('chart').className='';
+  $('chart').innerHTML=`<div class="fw"><svg viewBox="0 0 ${W} ${H}" width="100%">${ticks}${lbl}
+  ${r.actual.map(s=>mk(s,'var(--fg)','0')).join('')}${r.predicted.map(s=>mk(s,'var(--red)','5 4')).join('')}
+  <line x1="${m}" x2="${W-8}" y1="${y(r.threshold)}" y2="${y(r.threshold)}" stroke="var(--mut)" stroke-dasharray="2 4"/><text x="${W-10}" y="${y(r.threshold)-4}" fill="var(--mut)" font-size="11" text-anchor="end">threshold ${r.threshold}</text>
+  ${[['1','#f59e0b'],['3','#3b82f6']].filter(([k])=>$('c'+k).checked&&r.curves&&r.curves[k]).map(([k,c])=>`<polyline points="${laps.map((l,i)=>x(l)+','+y(r.curves[k][i])).join(' ')}" fill="none" stroke="${c}" stroke-width="1.8"/>`).join('')}
+  <polyline points="${pts}" fill="none" stroke="var(--red)" stroke-width="2.5"/></svg></div>
+  <small>Red: pit within 5 laps (detects the stops); orange / blue (optional): pit within 1 / 3 laps. Solid vertical lines = actual stops, dashed red = predicted stops. x-axis: lap.</small>`;
+}
+
+/* ---------- whole field overview ---------- */
+function fieldQuery(){
+  let q='';if($('thrbox').style.display==='flex')q+='&threshold='+$('thr').value;
+  if($('loc').value)q+='&locator='+$('loc').value;return q;
+}
+async function loadField(){
+  const body=$('field');
+  if(!TOTAL){body.className='msg';body.textContent='Load a race first.';return}
+  const q=fieldQuery(),key=$('race').value+q;if(key===FIELD_KEY)return;
+  const tok=++fieldTok;body.className='msg';body.innerHTML=spin('Scoring every car of the race (first time can take a minute)…');
+  try{
+    const f=await (await api('/api/field?race='+$('race').value+q)).json();
+    if(tok!==fieldTok)return;FIELD_KEY=key;fieldChart(f);
+  }catch(e){if(tok===fieldTok){body.className='msg err';body.textContent=e.message}}
+}
+function fieldChart(f){
+  const W=1000,rh=24,top=24,left=64,T=f.total_laps,n=f.drivers.length,H=top+n*rh+6;
+  const x=l=>left+l/T*(W-left-12),sel=$('driver').value;
+  const grid=[0,Math.round(T/4),Math.round(T/2),Math.round(3*T/4),T].map(l=>`<line x1="${x(l)}" x2="${x(l)}" y1="${top-4}" y2="${H-6}" stroke="var(--line)"/><text x="${x(l)}" y="12" fill="var(--mut)" font-size="11" text-anchor="middle">${l}</text>`).join('');
+  const rows=f.drivers.map((d,i)=>{
+    const cy=top+i*rh+rh/2;
+    return `<g><rect class="frow${d.code===sel?' sel':''}" data-code="${d.code}" x="0" y="${cy-rh/2}" width="${W}" height="${rh}"><title>${d.name||d.code}${d.team?' · '+d.team:''} - click to open</title></rect>
+    <circle cx="12" cy="${cy}" r="5" fill="${d.color}"/><text x="24" y="${cy+4}" font-size="12" font-weight="600" fill="var(--fg)">${d.code}</text>
+    <line x1="${left}" x2="${W-12}" y1="${cy}" y2="${cy}" stroke="var(--line)"/>
+    ${d.actual.map(s=>`<line x1="${x(s.lap)}" x2="${x(s.lap)}" y1="${cy-9}" y2="${cy+9}" stroke="var(--fg)" stroke-width="2.5"/>`).join('')}
+    ${d.predicted.map(s=>`<circle cx="${x(s.lap)}" cy="${cy}" r="5.5" fill="${COL[s.compound]||'#999'}" stroke="var(--fg)" stroke-width="1.2"><title>${d.code}: predicted stop at lap ${s.lap} onto ${s.compound}</title></circle>`).join('')}</g>`}).join('');
+  const s=f.summary,pct=(a,b)=>b?Math.round(100*a/b)+' %':'–';
+  $('field').className='';
+  $('field').innerHTML=`<p style="margin:0 0 8px;font-size:13px"><b>${s.actual}</b> real stops · <b>${s.predicted}</b> predicted · <b>${s.matched}</b> predicted stops (${pct(s.matched,s.predicted)}) within ${f.match_laps} laps of a real one · <b>${s.missed}</b> real stops (${pct(s.missed,s.actual)}) without a predicted stop nearby</p>
+  <div class="fw"><svg viewBox="0 0 ${W} ${H}" width="100%">${grid}${rows}</svg></div>
+  <div class="legend"><span><i style="width:3px;height:14px;background:var(--fg)"></i> actual stop</span><span><i style="width:11px;height:11px;border-radius:50%;background:var(--M);border:1.2px solid var(--fg)"></i> predicted stop, tyre colour = predicted compound</span><span>cars in finishing order · click a row to open that driver · threshold ${f.threshold}, stop lap from ${f.locators[f.locator]}</span></div>
+  ${f.split!=='test'?`<p class="err" style="margin:8px 0 0"><small>This race is in the ${f.split} data: the model was trained or tuned on this season, so the agreement is not an out-of-sample result.</small></p>`:''}`;
+  document.querySelectorAll('.frow').forEach(r=>r.onclick=()=>{if($('driver').disabled)return;$('driver').value=r.dataset.code;swatch();run();$('ctl').scrollIntoView({behavior:'smooth'})});
+}
+
+/* ---------- wiring ---------- */
+$('load').onclick=loadRace;$('go').onclick=run;$('driver').onchange=swatch;
+$('from').oninput=$('to').oninput=check;
+$('ctl').addEventListener('keydown',e=>{
+  if(e.key!=='Enter'||e.target.tagName==='BUTTON')return;e.preventDefault();
+  if(e.target.id==='race')loadRace();else if(!$('go').disabled)run();
+});
+init().catch(e=>{$('gif').className='msg err';$('gif').textContent=e.message});
+</script>
+</body>
+</html>
